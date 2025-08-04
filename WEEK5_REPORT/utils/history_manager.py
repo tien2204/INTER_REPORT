@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 from typing import Dict, List, Any
 import logging
-from ..config.settings import settings
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
