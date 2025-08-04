@@ -1,6 +1,6 @@
 import speech_recognition as sr
 from typing import Optional
-from ..config.settings import settings
+from config.settings import settings
 import logging
 
 logger = logging.getLogger(__name__)
