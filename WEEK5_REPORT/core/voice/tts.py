@@ -1,7 +1,7 @@
 import pyttsx3
 import os
 from typing import Optional, List, Dict
-from ..config.settings import settings
+from config.settings import settings
 import logging
 
 logger = logging.getLogger(__name__)
