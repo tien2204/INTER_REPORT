@@ -4,7 +4,7 @@ from pathlib import Path
 from PyPDF2 import PdfReader
 from docx import Document
 import pandas as pd
-from ..config.settings import settings
+from config.settings import settings
 import logging
 
 logger = logging.getLogger(__name__)
