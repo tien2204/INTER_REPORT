@@ -1,11 +1,11 @@
 from typing import Optional
 import logging
-from ..core.voice.stt import SpeechToText
-from ..core.voice.tts import TextToSpeech
-from ..core.text.question_rewriter import QuestionRewriter
-from ..services.document.processor import DocumentProcessor
-from ..utils.history_manager import HistoryManager
-from ..config.settings import settings
+from core.voice.stt import SpeechToText
+from core.voice.tts import TextToSpeech
+from core.text.question_rewriter import QuestionRewriter
+from services.document.processor import DocumentProcessor
+from utils.history_manager import HistoryManager
+from config.settings import settings
 import asyncio
 import numpy as np
 from sentence_transformers import SentenceTransformer
