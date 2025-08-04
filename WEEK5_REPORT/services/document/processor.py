@@ -3,9 +3,9 @@ from pathlib import Path
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.vectorstores import Chroma
-from .extractor import DocumentExtractor
-from ..utils.history_manager import HistoryManager
-from ..config.settings import settings
+from extractor import DocumentExtractor
+from utils.history_manager import HistoryManager
+from config.settings import settings
 import logging
 
 logger = logging.getLogger(__name__)
