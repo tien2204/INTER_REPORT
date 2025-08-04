@@ -1,6 +1,6 @@
 import openai
 from typing import List, Dict, Any
-from ..config.settings import settings
+from config.settings import settings
 import logging
 
 logger = logging.getLogger(__name__)
