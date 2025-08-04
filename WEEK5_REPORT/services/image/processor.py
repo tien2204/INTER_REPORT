@@ -7,7 +7,7 @@ from pathlib import Path
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.vectorstores import Chroma
 import fitz  # pymupdf
-from ..config.settings import settings
+from config.settings import settings
 import logging
 
 logger = logging.getLogger(__name__)
