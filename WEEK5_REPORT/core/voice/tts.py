@@ -1,80 +1,44 @@
-import pyttsx3
-import os
-from typing import Optional, List, Dict
-from config.settings import settings
+from TTS.api import TTS
+import sounddevice as sd
+import numpy as np
 import logging
+import torch
 
 logger = logging.getLogger(__name__)
 
 class TextToSpeech:
-    """
-    A class for converting text to speech using pyttsx3.
-    
-    Attributes:
-        engine (pyttsx3.Engine): Text-to-speech engine instance
-    """
-    
-    def __init__(self):
-        """
-        Initialize the TextToSpeech processor with default settings.
-        """
-        self.engine = pyttsx3.init()
-        self.engine.setProperty('rate', 150)  # Speed of speech
-        self.engine.setProperty('volume', 1.0)  # Volume (0.0 to 1.0)
+    def __init__(self, language="en"):
+        # Kiểm tra nếu có GPU
+        self.use_gpu = torch.cuda.is_available()
+        logger.info(f"Using GPU: {self.use_gpu}")
+        self.set_voice(language)
 
     def speak(self, text: str) -> None:
-        """
-        Convert text to speech and play it.
-        
-        Args:
-            text (str): Text to be spoken
-            
-        Raises:
-            Exception: If there's an error during speech synthesis
-        """
         try:
             logger.info(f"Speaking: {text}")
-            self.engine.say(text)
-            self.engine.runAndWait()
+            # Generate waveform
+            wav = self.tts.tts(text)
+            # Play audio
+            sd.play(wav, samplerate=22050)
+            sd.wait()
         except Exception as e:
             logger.error(f"Error in speak: {e}")
             raise
 
-    def set_voice(self, language: str = "vi") -> Optional[str]:
-        """
-        Set the voice based on the specified language.
-        
-        Args:
-            language (str): Language code for the desired voice (default: "vi")
-            
-        Returns:
-            Optional[str]: ID of the selected voice if found, None otherwise
-        """
+    def set_voice(self, language: str = "vi") -> None:
         try:
-            voices = self.engine.getProperty('voices')
-            
-            for voice in voices:
-                if language in voice.languages[0].decode():
-                    self.engine.setProperty('voice', voice.id)
-                    return voice.id
-            
-            logger.warning(f"No voice found for language: {language}")
-            return None
+            logger.info(f"Setting voice to language: {language}")
+            if language == "vi":
+                model = "tts_models/vi/vivos/glow-tts"
+            elif language == "en":
+                model = "tts_models/en/ljspeech/tacotron2-DDC"
+            else:
+                raise ValueError(f"Unsupported language: {language}")
+            self.tts = TTS(model_name=model, progress_bar=False, gpu=self.use_gpu)
         except Exception as e:
-            logger.error(f"Error in set_voice: {e}")
-            return None
+            logger.error(f"Error setting voice: {e}")
+            raise
 
-    def get_available_voices(self) -> List[Dict[str, Any]]:
-        """
-        Get list of available voices with their properties.
-        
-        Returns:
-            List[Dict[str, Any]]: List of voice properties
-        """
-        voices = self.engine.getProperty('voices')
-        return [{
-            'id': voice.id,
-            'name': voice.name,
-            'languages': voice.languages,
-            'gender': voice.gender
-        } for voice in voices]
+    def get_available_voices(self):
+        return ["en", "vi"]
+

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List, Dict, Any
 import logging
 from core.voice.stt import SpeechToText
 from core.voice.tts import TextToSpeech
@@ -9,6 +9,9 @@ from config.settings import settings
 import asyncio
 import numpy as np
 from sentence_transformers import SentenceTransformer
+
+from dotenv import load_dotenv
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +40,7 @@ class VoiceAssistant:
         self.context_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
         
         # Set Vietnamese voice
-        self.tts.set_voice("vi")
+        self.tts.set_voice("en")
 
     async def process_voice_query(self) -> None:
         """
