@@ -1,278 +1,369 @@
 """
-Communication protocols and message structures for inter-agent communication
+Communication Protocols Module
+
+Defines communication protocols and message structures
+for inter-agent communication.
 """
 
-from typing import Dict, Any, Optional, List, Union
+from typing import Any, Dict, List, Optional, Union
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 import uuid
-import logging
 
-logger = logging.getLogger(__name__)
 
 class MessageType(Enum):
-    """Types of messages between agents"""
+    """Message types for inter-agent communication"""
     REQUEST = "request"
     RESPONSE = "response"
     NOTIFICATION = "notification"
     ERROR = "error"
-    STATUS_UPDATE = "status_update"
-    WORKFLOW_CONTROL = "workflow_control"
+    HEARTBEAT = "heartbeat"
 
-class AgentType(Enum):
-    """Types of agents in the system"""
-    STRATEGIST = "strategist"
-    BACKGROUND_DESIGNER = "background_designer"
-    FOREGROUND_DESIGNER = "foreground_designer"
-    DEVELOPER = "developer"
-    DESIGN_REVIEWER = "design_reviewer"
 
-class ResponseStatus(Enum):
-    """Response status codes"""
-    SUCCESS = "success"
-    ERROR = "error"
-    PARTIAL = "partial"
-    PENDING = "pending"
-    TIMEOUT = "timeout"
+class Priority(Enum):
+    """Message priority levels"""
+    LOW = 1
+    NORMAL = 2
+    HIGH = 3
+    CRITICAL = 4
+
+
+class EventType(Enum):
+    """Event types for system events"""
+    AGENT_STARTED = "agent_started"
+    AGENT_STOPPED = "agent_stopped"
+    AGENT_ERROR = "agent_error"
+    TASK_STARTED = "task_started"
+    TASK_COMPLETED = "task_completed"
+    TASK_FAILED = "task_failed"
+    WORKFLOW_STARTED = "workflow_started"
+    WORKFLOW_COMPLETED = "workflow_completed"
+    ITERATION_CREATED = "iteration_created"
+    FEEDBACK_RECEIVED = "feedback_received"
+
 
 @dataclass
-class AgentMessage:
+class Message:
     """Base message structure for inter-agent communication"""
-    message_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    from_agent: str = ""
-    to_agent: str = ""
-    message_type: MessageType = MessageType.REQUEST
-    action: str = ""
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    type: MessageType = MessageType.REQUEST
+    sender: str = ""
+    recipient: str = ""
     payload: Dict[str, Any] = field(default_factory=dict)
-    session_id: Optional[str] = None
+    priority: Priority = Priority.NORMAL
     correlation_id: Optional[str] = None
-    timestamp: datetime = field(default_factory=datetime.now)
-    timeout: Optional[int] = None  # seconds
+    reply_to: Optional[str] = None
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+    ttl: Optional[int] = None  # Time to live in seconds
     retry_count: int = 0
     max_retries: int = 3
-    metadata: Dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert message to dictionary"""
-        return {
-            'message_id': self.message_id,
-            'from_agent': self.from_agent,
-            'to_agent': self.to_agent,
-            'message_type': self.message_type.value,
-            'action': self.action,
-            'payload': self.payload,
-            'session_id': self.session_id,
-            'correlation_id': self.correlation_id,
-            'timestamp': self.timestamp.isoformat(),
-            'timeout': self.timeout,
-            'retry_count': self.retry_count,
-            'max_retries': self.max_retries,
-            'metadata': self.metadata
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'AgentMessage':
-        """Create message from dictionary"""
-        return cls(
-            message_id=data.get('message_id', str(uuid.uuid4())),
-            from_agent=data.get('from_agent', ''),
-            to_agent=data.get('to_agent', ''),
-            message_type=MessageType(data.get('message_type', 'request')),
-            action=data.get('action', ''),
-            payload=data.get('payload', {}),
-            session_id=data.get('session_id'),
-            correlation_id=data.get('correlation_id'),
-            timestamp=datetime.fromisoformat(data.get('timestamp', datetime.now().isoformat())),
-            timeout=data.get('timeout'),
-            retry_count=data.get('retry_count', 0),
-            max_retries=data.get('max_retries', 3),
-            metadata=data.get('metadata', {})
-        )
 
 @dataclass
-class AgentResponse:
-    """Response message structure"""
-    response_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    request_id: str = ""
-    from_agent: str = ""
-    to_agent: str = ""
-    status: ResponseStatus = ResponseStatus.SUCCESS
-    result: Any = None
-    error: Optional[str] = None
-    error_details: Optional[Dict[str, Any]] = None
-    session_id: Optional[str] = None
-    timestamp: datetime = field(default_factory=datetime.now)
-    processing_time: Optional[float] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+class Event:
+    """Event structure for system events"""
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    type: EventType = EventType.AGENT_STARTED
+    source: str = ""
+    data: Dict[str, Any] = field(default_factory=dict)
+    timestamp: datetime = field(default_factory=datetime.utcnow)
+    correlation_id: Optional[str] = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert response to dictionary"""
-        return {
-            'response_id': self.response_id,
-            'request_id': self.request_id,
-            'from_agent': self.from_agent,
-            'to_agent': self.to_agent,
-            'status': self.status.value,
-            'result': self.result,
-            'error': self.error,
-            'error_details': self.error_details,
-            'session_id': self.session_id,
-            'timestamp': self.timestamp.isoformat(),
-            'processing_time': self.processing_time,
-            'metadata': self.metadata
+
+class MessageProtocol:
+    """
+    Protocol definitions for inter-agent messages
+    """
+    
+    @staticmethod
+    def create_request(sender: str, recipient: str, action: str, 
+                      data: Dict[str, Any] = None, 
+                      priority: Priority = Priority.NORMAL,
+                      correlation_id: str = None) -> Message:
+        """Create a request message"""
+        payload = {
+            "action": action,
+            "data": data or {}
         }
+        
+        return Message(
+            type=MessageType.REQUEST,
+            sender=sender,
+            recipient=recipient,
+            payload=payload,
+            priority=priority,
+            correlation_id=correlation_id
+        )
+    
+    @staticmethod
+    def create_response(original_message: Message, sender: str,
+                       success: bool, data: Dict[str, Any] = None,
+                       error: str = None) -> Message:
+        """Create a response message"""
+        payload = {
+            "success": success,
+            "data": data or {},
+            "error": error
+        }
+        
+        return Message(
+            type=MessageType.RESPONSE,
+            sender=sender,
+            recipient=original_message.sender,
+            payload=payload,
+            correlation_id=original_message.id,
+            reply_to=original_message.id
+        )
+    
+    @staticmethod
+    def create_notification(sender: str, event_type: str,
+                          data: Dict[str, Any] = None,
+                          recipients: List[str] = None) -> Message:
+        """Create a notification message"""
+        payload = {
+            "event_type": event_type,
+            "data": data or {},
+            "recipients": recipients or []
+        }
+        
+        return Message(
+            type=MessageType.NOTIFICATION,
+            sender=sender,
+            payload=payload
+        )
+    
+    @staticmethod
+    def create_error(sender: str, recipient: str, error_code: str,
+                    error_message: str, original_message_id: str = None) -> Message:
+        """Create an error message"""
+        payload = {
+            "error_code": error_code,
+            "error_message": error_message,
+            "original_message_id": original_message_id
+        }
+        
+        return Message(
+            type=MessageType.ERROR,
+            sender=sender,
+            recipient=recipient,
+            payload=payload,
+            priority=Priority.HIGH
+        )
+    
+    @staticmethod
+    def create_heartbeat(sender: str, status: str = "alive",
+                        data: Dict[str, Any] = None) -> Message:
+        """Create a heartbeat message"""
+        payload = {
+            "status": status,
+            "data": data or {}
+        }
+        
+        return Message(
+            type=MessageType.HEARTBEAT,
+            sender=sender,
+            payload=payload,
+            priority=Priority.LOW
+        )
+
+
+class EventProtocol:
+    """
+    Protocol definitions for system events
+    """
+    
+    @staticmethod
+    def create_agent_event(event_type: EventType, agent_id: str,
+                          data: Dict[str, Any] = None,
+                          correlation_id: str = None) -> Event:
+        """Create an agent-related event"""
+        return Event(
+            type=event_type,
+            source=agent_id,
+            data=data or {},
+            correlation_id=correlation_id
+        )
+    
+    @staticmethod
+    def create_task_event(event_type: EventType, agent_id: str,
+                         task_id: str, task_type: str,
+                         data: Dict[str, Any] = None) -> Event:
+        """Create a task-related event"""
+        additional_data = data or {}
+        event_data = {
+            "task_id": task_id,
+            "task_type": task_type,
+        }
+        event_data.update(additional_data)  # Fixed syntax error
+        
+        return Event(
+            type=event_type,
+            source=agent_id,
+            data=event_data
+        )
+    
+    @staticmethod
+    def create_workflow_event(event_type: EventType, workflow_id: str,
+                            campaign_id: str, current_step: str = None,
+                            data: Dict[str, Any] = None) -> Event:
+        """Create a workflow-related event"""
+        additional_data = data or {}
+        event_data = {
+            "workflow_id": workflow_id,
+            "campaign_id": campaign_id,
+            "current_step": current_step,
+        }
+        event_data.update(additional_data)  # Fixed syntax error
+        
+        return Event(
+            type=event_type,
+            source="workflow_manager",
+            data=event_data
+        )
+    
+    @staticmethod
+    def create_iteration_event(campaign_id: str, iteration_id: str,
+                             iteration_number: int, status: str,
+                             data: Dict[str, Any] = None) -> Event:
+        """Create an iteration-related event"""
+        additional_data = data or {}
+        event_data = {
+            "campaign_id": campaign_id,
+            "iteration_id": iteration_id,
+            "iteration_number": iteration_number,
+            "status": status,
+        }
+        event_data.update(additional_data)  # Fixed syntax error
+        
+        return Event(
+            type=EventType.ITERATION_CREATED,
+            source="design_system",
+            data=event_data
+        )
+
+
+class WorkflowProtocol:
+    """
+    Protocol definitions for workflow-specific messages
+    """
+    # Define workflow channels
+    CHANNELS = {
+        "background_design": "workflow.background_design",
+        "foreground_design": "workflow.foreground_design", 
+        "error_handling": "workflow.error_handling",
+        "strategist": "workflow.strategist",
+        "composition": "workflow.composition",
+        "finalization": "workflow.finalization"
+    }
+
+    
+    # Strategist Agent Messages
+    ANALYZE_BRIEF = "analyze_brief"
+    PROCESS_LOGO = "process_logo"
+    EXTRACT_BRAND_INFO = "extract_brand_info"
+    DEFINE_STRATEGY = "define_strategy"
+    
+    # Background Designer Messages
+    GENERATE_BACKGROUND = "generate_background"
+    VALIDATE_BACKGROUND = "validate_background"
+    REFINE_BACKGROUND = "refine_background"
+    
+    # Foreground Designer Messages
+    CREATE_LAYOUT = "create_layout"
+    GENERATE_BLUEPRINT = "generate_blueprint"
+    SELECT_TYPOGRAPHY = "select_typography"
+    DESIGN_CTA = "design_cta"
+    
+    # Developer Messages
+    COMPILE_BLUEPRINT = "compile_blueprint"
+    GENERATE_SVG = "generate_svg"
+    GENERATE_FIGMA_CODE = "generate_figma_code"
+    RENDER_PREVIEW = "render_preview"
+    
+    # Reviewer Messages
+    REVIEW_DESIGN = "review_design"
+    PROVIDE_FEEDBACK = "provide_feedback"
+    VALIDATE_DESIGN = "validate_design"
+    
+    # Workflow states
+    STATES = {
+        "INITIALIZING": "initializing",
+        "STRATEGY_PLANNING": "strategy_planning", 
+        "BACKGROUND_DESIGN": "background_design",
+        "FOREGROUND_DESIGN": "foreground_design",
+        "COMPOSITION": "composition",
+        "FINALIZATION": "finalization",
+        "COMPLETED": "completed",
+        "FAILED": "failed"
+    }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'AgentResponse':
-        """Create response from dictionary"""
-        return cls(
-            response_id=data.get('response_id', str(uuid.uuid4())),
-            request_id=data.get('request_id', ''),
-            from_agent=data.get('from_agent', ''),
-            to_agent=data.get('to_agent', ''),
-            status=ResponseStatus(data.get('status', 'success')),
-            result=data.get('result'),
-            error=data.get('error'),
-            error_details=data.get('error_details'),
-            session_id=data.get('session_id'),
-            timestamp=datetime.fromisoformat(data.get('timestamp', datetime.now().isoformat())),
-            processing_time=data.get('processing_time'),
-            metadata=data.get('metadata', {})
-        )
-
-class CommunicationProtocol:
-    """Base communication protocol interface"""
-    
-    def __init__(self):
-        self.message_handlers: Dict[str, callable] = {}
-    
-    def register_handler(self, action: str, handler: callable) -> None:
-        """Register message handler for specific action"""
-        self.message_handlers[action] = handler
-        logger.debug(f"Registered handler for action: {action}")
-    
-    def unregister_handler(self, action: str) -> None:
-        """Unregister message handler"""
-        if action in self.message_handlers:
-            del self.message_handlers[action]
-            logger.debug(f"Unregistered handler for action: {action}")
-    
-    def get_handler(self, action: str) -> Optional[callable]:
-        """Get handler for action"""
-        return self.message_handlers.get(action)
-    
-    def validate_message(self, message: AgentMessage) -> bool:
-        """Validate message format and content"""
-        if not message.from_agent or not message.to_agent:
-            return False
-        if not message.action:
-            return False
-        if not isinstance(message.payload, dict):
-            return False
-        return True
-
-class MessageProtocol(CommunicationProtocol):
-    """Protocol for standard message handling"""
-    
-    def __init__(self):
-        super().__init__()
-        self._setup_standard_handlers()
-    
-    def _setup_standard_handlers(self) -> None:
-        """Setup standard message handlers"""
-        self.register_handler("ping", self._handle_ping)
-        self.register_handler("status", self._handle_status)
-        self.register_handler("error", self._handle_error)
-    
-    def _handle_ping(self, message: AgentMessage) -> AgentResponse:
-        """Handle ping message"""
-        return AgentResponse(
-            request_id=message.message_id,
-            from_agent=message.to_agent,
-            to_agent=message.from_agent,
-            status=ResponseStatus.SUCCESS,
-            result={"pong": True, "timestamp": datetime.now().isoformat()}
-        )
-    
-    def _handle_status(self, message: AgentMessage) -> AgentResponse:
-        """Handle status request"""
-        return AgentResponse(
-            request_id=message.message_id,
-            from_agent=message.to_agent,
-            to_agent=message.from_agent,
-            status=ResponseStatus.SUCCESS,
-            result={"status": "active", "timestamp": datetime.now().isoformat()}
-        )
-    
-    def _handle_error(self, message: AgentMessage) -> AgentResponse:
-        """Handle error message"""
-        error_info = message.payload.get("error", "Unknown error")
-        logger.error(f"Received error from {message.from_agent}: {error_info}")
+    def create_workflow_request(cls, sender: str, recipient: str, action: str,
+                              campaign_id: str, iteration_id: str = None,
+                              data: Dict[str, Any] = None) -> Message:
+        """Create a workflow-specific request"""
+        payload = {
+            "action": action,
+            "campaign_id": campaign_id,
+            "iteration_id": iteration_id,
+            "data": data or {}
+        }
         
-        return AgentResponse(
-            request_id=message.message_id,
-            from_agent=message.to_agent,
-            to_agent=message.from_agent,
-            status=ResponseStatus.SUCCESS,
-            result={"acknowledged": True}
+        return Message(
+            type=MessageType.REQUEST,
+            sender=sender,
+            recipient=recipient,
+            payload=payload,
+            priority=Priority.NORMAL
         )
 
-class WorkflowProtocol(CommunicationProtocol):
-    """Protocol for workflow-specific communication"""
+    @staticmethod
+    def create_workflow_message(workflow_action: str, session_id: str, 
+                               agent_id: str, data: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Create a workflow message"""
+        return {
+            "type": "workflow",
+            "workflow_action": workflow_action,
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "data": data or {},
+            "timestamp": datetime.utcnow().isoformat(),
+            "message_id": str(uuid.uuid4())
+        }
     
-    def __init__(self):
-        super().__init__()
-        self._setup_workflow_handlers()
-    
-    def _setup_workflow_handlers(self) -> None:
-        """Setup workflow-specific handlers"""
-        self.register_handler("analyze_brief", self._handle_analyze_brief)
-        self.register_handler("generate_background", self._handle_generate_background)
-        self.register_handler("create_blueprint", self._handle_create_blueprint)
-        self.register_handler("generate_code", self._handle_generate_code)
-        self.register_handler("review_design", self._handle_review_design)
-        self.register_handler("provide_feedback", self._handle_provide_feedback)
-    
-    def _handle_analyze_brief(self, message: AgentMessage) -> AgentResponse:
-        """Handle brief analysis request"""
-        # This would be implemented by the Strategist agent
-        return self._create_workflow_response(message, "Brief analysis completed")
-    
-    def _handle_generate_background(self, message: AgentMessage) -> AgentResponse:
-        """Handle background generation request"""
-        # This would be implemented by the Background Designer agent
-        return self._create_workflow_response(message, "Background generated")
-    
-    def _handle_create_blueprint(self, message: AgentMessage) -> AgentResponse:
-        """Handle blueprint creation request"""
-        # This would be implemented by the Foreground Designer agent
-        return self._create_workflow_response(message, "Blueprint created")
-    
-    def _handle_generate_code(self, message: AgentMessage) -> AgentResponse:
-        """Handle code generation request"""
-        # This would be implemented by the Developer agent
-        return self._create_workflow_response(message, "Code generated")
-    
-    def _handle_review_design(self, message: AgentMessage) -> AgentResponse:
-        """Handle design review request"""
-        # This would be implemented by the Design Reviewer agent
-        return self._create_workflow_response(message, "Design reviewed")
-    
-    def _handle_provide_feedback(self, message: AgentMessage) -> AgentResponse:
-        """Handle feedback provision"""
-        return self._create_workflow_response(message, "Feedback provided")
-    
-    def _create_workflow_response(self, message: AgentMessage, result_message: str) -> AgentResponse:
-        """Create standard workflow response"""
-        return AgentResponse(
-            request_id=message.message_id,
-            from_agent=message.to_agent,
-            to_agent=message.from_agent,
-            status=ResponseStatus.SUCCESS,
-            result={
-                "message": result_message,
-                "session_id": message.session_id,
-                "action": message.action
+    @staticmethod
+    def create_state_transition_message(session_id: str, from_state: str, 
+                                      to_state: str, agent_id: str) -> Dict[str, Any]:
+        """Create a state transition message"""
+        return WorkflowProtocol.create_workflow_message(
+            workflow_action="state_transition",
+            session_id=session_id,
+            agent_id=agent_id,
+            data={
+                "from_state": from_state,
+                "to_state": to_state,
+                "transition_time": datetime.utcnow().isoformat()
             }
         )
+
+
+class AgentIdentifiers:
+    """Standard agent identifiers"""
+    STRATEGIST = "strategist_agent"
+    BACKGROUND_DESIGNER = "background_designer_agent"
+    FOREGROUND_DESIGNER = "foreground_designer_agent"
+    DEVELOPER = "developer_agent"
+    DESIGN_REVIEWER = "design_reviewer_agent"
+    WORKFLOW_MANAGER = "workflow_manager"
+    API_GATEWAY = "api_gateway"
+
+
+class ChannelNames:
+    """Standard channel names for pub/sub"""
+    AGENT_EVENTS = "agent_events"
+    TASK_EVENTS = "task_events"
+    WORKFLOW_EVENTS = "workflow_events"
+    SYSTEM_EVENTS = "system_events"
+    ERROR_EVENTS = "error_events"
+    NOTIFICATIONS = "notifications"

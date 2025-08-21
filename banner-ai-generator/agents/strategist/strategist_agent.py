@@ -1,675 +1,467 @@
 """
-Strategist Agent - Campaign analysis and strategic direction
+Strategist Agent
+
+Main agent responsible for campaign analysis, brand processing,
+and strategic direction for banner generation.
 """
 
 import asyncio
-import logging
-from typing import Dict, Any, Optional, List
-from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 import uuid
+from structlog import get_logger
 
-from communication.protocol import AgentMessage, AgentResponse, MessageType, ResponseStatus, AgentType
-from communication.message_queue import MessageQueue, MessagePriority
-from communication.event_dispatcher import EventDispatcher, EventType
-from memory_manager.shared_memory import SharedMemoryManager
-from config.environments import get_agent_config, get_model_config
+from .brief_analyzer import BriefAnalyzer
+from .logo_processor import LogoProcessor
+from .brand_analyzer import BrandAnalyzer
+from .target_analyzer import TargetAudienceAnalyzer
+from communication.protocol import MessageProtocol, AgentIdentifiers, WorkflowProtocol
+from communication.message_queue import MessageQueue
+from memory_manager.shared_memory import SharedMemory, CampaignData
+from memory_manager.session_manager import SessionManager
 
-from .brief_analyzer import BriefAnalyzer, BriefAnalysisResult
-from .logo_processor import LogoProcessor, LogoProcessingResult
-from .brand_analyzer import BrandAnalyzer, BrandAnalysisResult
-from .target_analyzer import TargetAnalyzer, TargetAnalysisResult
+logger = get_logger(__name__)
 
-logger = logging.getLogger(__name__)
-
-@dataclass
-class StrategicDirection:
-    """Strategic direction output from Strategist"""
-    session_id: str
-    campaign_id: str
-    
-    # Analysis results
-    brief_analysis: BriefAnalysisResult
-    brand_analysis: BrandAnalysisResult
-    target_analysis: TargetAnalysisResult
-    logo_processing: Optional[LogoProcessingResult] = None
-    
-    # Strategic recommendations
-    mood_board: Dict[str, Any] = field(default_factory=dict)
-    color_palette: List[str] = field(default_factory=list)
-    design_direction: Dict[str, Any] = field(default_factory=dict)
-    messaging_strategy: Dict[str, Any] = field(default_factory=dict)
-    
-    # Validation results
-    brand_consistency_score: float = 0.0
-    target_alignment_score: float = 0.0
-    
-    # Metadata
-    created_at: datetime = field(default_factory=datetime.now)
-    processing_time: float = 0.0
-    confidence_score: float = 0.0
 
 class StrategistAgent:
     """
-    Strategist Agent - Analyzes campaign briefs and provides strategic direction
-    Main entry point for the multi-agent workflow
+    Strategist Agent - Interface with advertisers and campaign strategy
     """
     
-    def __init__(self,
-                 message_queue: MessageQueue,
-                 event_dispatcher: EventDispatcher,
-                 shared_memory: SharedMemoryManager,
-                 agent_id: str = "strategist_001"):
-        
-        self.agent_id = agent_id
-        self.agent_type = AgentType.STRATEGIST
-        self.message_queue = message_queue
-        self.event_dispatcher = event_dispatcher
+    def __init__(self, shared_memory: SharedMemory, message_queue: MessageQueue,
+                 session_manager: SessionManager, config: Dict[str, Any] = None):
+        self.agent_id = AgentIdentifiers.STRATEGIST
         self.shared_memory = shared_memory
+        self.message_queue = message_queue
+        self.session_manager = session_manager
+        self.config = config or {}
         
-        # Load configuration
-        self.config = get_agent_config("strategist")
-        if not self.config:
-            raise ValueError("Strategist configuration not found")
+        # Initialize sub-components
+        self.brief_analyzer = BriefAnalyzer(config.get("brief_analyzer", {}))
+        self.logo_processor = LogoProcessor(config.get("logo_processor", {}))
+        self.brand_analyzer = BrandAnalyzer(config.get("brand_analyzer", {}))
+        self.target_analyzer = TargetAudienceAnalyzer(config.get("target_analyzer", {}))
         
-        # Initialize analyzers
-        self.brief_analyzer = BriefAnalyzer()
-        self.logo_processor = LogoProcessor()
-        self.brand_analyzer = BrandAnalyzer()
-        self.target_analyzer = TargetAnalyzer()
-        
-        # State management
-        self._active_sessions: Dict[str, Dict[str, Any]] = {}
-        self._processing_queue: asyncio.Queue = asyncio.Queue()
         self._running = False
-        
-        # Statistics
-        self._stats = {
-            'campaigns_analyzed': 0,
-            'logos_processed': 0,
-            'processing_errors': 0,
-            'average_processing_time': 0.0
-        }
-        
-        # Setup message handling
-        self.message_queue.subscribe(self.agent_id, self._handle_message)
-        
-        # Setup event handling
-        self.event_dispatcher.subscribe(EventType.SYSTEM_ERROR, self._handle_system_error)
-        
-        logger.info(f"Strategist Agent initialized: {self.agent_id}")
+        self._session_id = None
     
-    async def start(self) -> None:
+    async def start(self):
         """Start the strategist agent"""
-        if self._running:
-            return
-        
-        self._running = True
-        
-        # Start processing loop
-        asyncio.create_task(self._process_requests())
-        
-        # Register with coordinator
-        self.event_dispatcher.dispatch_event(
-            EventType.AGENT_STARTED,
-            source=self.agent_id,
-            data={
-                'agent_type': self.agent_type.value,
-                'capabilities': self.config.capabilities,
-                'status': 'active'
-            }
-        )
-        
-        logger.info(f"Strategist Agent started: {self.agent_id}")
+        try:
+            self._running = True
+            
+            # Subscribe to messages using the correct method name
+            await self.message_queue.subscribe(
+                self.agent_id, 
+                self._handle_message
+            )
+            
+            logger.info(f"Strategist Agent {self.agent_id} started")
+            
+        except Exception as e:
+            logger.error(f"Failed to start Strategist Agent: {e}")
+            raise
     
-    async def stop(self) -> None:
+    async def stop(self):
         """Stop the strategist agent"""
         self._running = False
-        
-        # Dispatch stop event
-        self.event_dispatcher.dispatch_event(
-            EventType.AGENT_STOPPED,
-            source=self.agent_id,
-            data={'agent_type': self.agent_type.value}
-        )
-        
-        logger.info(f"Strategist Agent stopped: {self.agent_id}")
+        # Use the correct method name
+        await self.message_queue.unsubscribe(self.agent_id)
+        logger.info(f"Strategist Agent {self.agent_id} stopped")
     
-    def _handle_message(self, message) -> None:
+    async def _handle_message(self, message):
         """Handle incoming messages"""
         try:
-            agent_message = message.content
+            action = message.payload.get("action")
             
-            # Add to processing queue
-            asyncio.create_task(self._queue_request(agent_message))
-            
+            if action == WorkflowProtocol.ANALYZE_BRIEF:
+                await self._handle_analyze_brief(message)
+            elif action == WorkflowProtocol.PROCESS_LOGO:
+                await self._handle_process_logo(message)
+            elif action == WorkflowProtocol.EXTRACT_BRAND_INFO:
+                await self._handle_extract_brand_info(message)
+            elif action == WorkflowProtocol.DEFINE_STRATEGY:
+                await self._handle_define_strategy(message)
+            else:
+                logger.warning(f"Unknown action: {action}")
+                
         except Exception as e:
             logger.error(f"Error handling message: {e}")
-            self._send_error_response(agent_message, str(e))
+            
+            # Send error response
+            error_response = MessageProtocol.create_response(
+                message, self.agent_id, False, error=str(e)
+            )
+            await self.message_queue.publish(message.reply_to or self.agent_id, error_response)
     
-    async def _queue_request(self, message: AgentMessage) -> None:
-        """Queue request for processing"""
-        await self._processing_queue.put(message)
-    
-    async def _process_requests(self) -> None:
-        """Process requests from queue"""
-        while self._running:
-            try:
-                # Get request from queue with timeout
-                message = await asyncio.wait_for(
-                    self._processing_queue.get(), 
-                    timeout=1.0
-                )
-                
-                # Process request
-                await self._process_request(message)
-                
-            except asyncio.TimeoutError:
-                continue
-            except Exception as e:
-                logger.error(f"Error processing requests: {e}")
-    
-    async def _process_request(self, message: AgentMessage) -> None:
-        """Process individual request"""
-        start_time = datetime.now()
+    async def create_campaign(self, brief: Dict[str, Any], brand_assets: Dict[str, Any] = None) -> str:
+        """
+        Create a new campaign and analyze it
         
+        Args:
+            brief: Campaign brief from advertiser
+            brand_assets: Brand assets (logo, images, etc.)
+            
+        Returns:
+            Campaign ID
+        """
         try:
-            # Route based on action
-            if message.action == "analyze_brief":
-                response = await self._analyze_brief(message)
-            elif message.action == "process_logo":
-                response = await self._process_logo(message)
-            elif message.action == "analyze_brand":
-                response = await self._analyze_brand(message)
-            elif message.action == "analyze_target":
-                response = await self._analyze_target(message)
-            elif message.action == "create_strategic_direction":
-                response = await self._create_strategic_direction(message)
-            elif message.action == "validate_brand_assets":
-                response = await self._validate_brand_assets(message)
-            elif message.action == "ping":
-                response = self._handle_ping(message)
-            else:
-                response = AgentResponse(
-                    request_id=message.message_id,
-                    from_agent=self.agent_id,
-                    to_agent=message.from_agent,
-                    status=ResponseStatus.ERROR,
-                    error=f"Unknown action: {message.action}"
-                )
+            campaign_id = str(uuid.uuid4())
             
-            # Calculate processing time
-            processing_time = (datetime.now() - start_time).total_seconds()
-            response.processing_time = processing_time
+            # Create session
+            self._session_id = await self.session_manager.create_agent_session(
+                self.agent_id, campaign_id
+            )
             
-            # Update statistics
-            self._update_stats(message.action, processing_time, response.status == ResponseStatus.SUCCESS)
-            
-            # Send response
-            self.message_queue.send_response(response)
-            
-        except Exception as e:
-            logger.error(f"Error processing request {message.action}: {e}")
-            self._send_error_response(message, str(e))
-    
-    async def _analyze_brief(self, message: AgentMessage) -> AgentResponse:
-        """Analyze campaign brief"""
-        try:
-            brief_data = message.payload.get('brief', {})
-            session_id = message.session_id
-            
-            if not brief_data:
-                raise ValueError("No brief data provided")
+            logger.info(f"Created campaign {campaign_id} with session {self._session_id}")
             
             # Analyze brief
-            analysis_result = await self.brief_analyzer.analyze(brief_data)
+            brief_analysis = await self.brief_analyzer.analyze_brief(brief)
             
-            # Store in shared memory
-            if session_id:
-                self.shared_memory.set_data(
-                    session_id, 
-                    'brief_analysis', 
-                    analysis_result.to_dict(),
-                    agent_id=self.agent_id
-                )
-            
-            return AgentResponse(
-                request_id=message.message_id,
-                from_agent=self.agent_id,
-                to_agent=message.from_agent,
-                status=ResponseStatus.SUCCESS,
-                result={
-                    'analysis': analysis_result.to_dict(),
-                    'session_id': session_id
-                }
-            )
-            
-        except Exception as e:
-            raise Exception(f"Brief analysis failed: {e}")
-    
-    async def _process_logo(self, message: AgentMessage) -> AgentResponse:
-        """Process logo file"""
-        try:
-            logo_data = message.payload.get('logo', {})
-            session_id = message.session_id
-            
-            if not logo_data:
-                raise ValueError("No logo data provided")
-            
-            # Process logo
-            processing_result = await self.logo_processor.process(logo_data)
-            
-            # Store in shared memory
-            if session_id:
-                self.shared_memory.set_data(
-                    session_id,
-                    'logo_processing',
-                    processing_result.to_dict(),
-                    agent_id=self.agent_id
-                )
+            # Process brand assets if provided
+            processed_assets = {}
+            if brand_assets:
+                if "logo" in brand_assets:
+                    processed_logo = await self.logo_processor.process_logo(
+                        brand_assets["logo"]
+                    )
+                    processed_assets["logo"] = processed_logo
                 
-                self._stats['logos_processed'] += 1
-            
-            return AgentResponse(
-                request_id=message.message_id,
-                from_agent=self.agent_id,
-                to_agent=message.from_agent,
-                status=ResponseStatus.SUCCESS,
-                result={
-                    'processing_result': processing_result.to_dict(),
-                    'session_id': session_id
-                }
-            )
-            
-        except Exception as e:
-            raise Exception(f"Logo processing failed: {e}")
-    
-    async def _analyze_brand(self, message: AgentMessage) -> AgentResponse:
-        """Analyze brand assets and identity"""
-        try:
-            brand_data = message.payload.get('brand_assets', {})
-            brief_context = message.payload.get('brief_context', {})
-            session_id = message.session_id
-            
-            if not brand_data:
-                raise ValueError("No brand data provided")
+                # Process other assets
+                for asset_type, asset_data in brand_assets.items():
+                    if asset_type != "logo":
+                        processed_assets[asset_type] = asset_data
             
             # Analyze brand
-            analysis_result = await self.brand_analyzer.analyze(brand_data, brief_context)
-            
-            # Store in shared memory
-            if session_id:
-                self.shared_memory.set_data(
-                    session_id,
-                    'brand_analysis', 
-                    analysis_result.to_dict(),
-                    agent_id=self.agent_id
-                )
-            
-            return AgentResponse(
-                request_id=message.message_id,
-                from_agent=self.agent_id,
-                to_agent=message.from_agent,
-                status=ResponseStatus.SUCCESS,
-                result={
-                    'analysis': analysis_result.to_dict(),
-                    'session_id': session_id
-                }
+            brand_analysis = await self.brand_analyzer.analyze_brand(
+                brief_analysis, processed_assets
             )
-            
-        except Exception as e:
-            raise Exception(f"Brand analysis failed: {e}")
-    
-    async def _analyze_target(self, message: AgentMessage) -> AgentResponse:
-        """Analyze target audience"""
-        try:
-            target_data = message.payload.get('target_audience', {})
-            brief_context = message.payload.get('brief_context', {})
-            session_id = message.session_id
-            
-            if not target_data:
-                raise ValueError("No target audience data provided")
             
             # Analyze target audience
-            analysis_result = await self.target_analyzer.analyze(target_data, brief_context)
-            
-            # Store in shared memory
-            if session_id:
-                self.shared_memory.set_data(
-                    session_id,
-                    'target_analysis',
-                    analysis_result.to_dict(),
-                    agent_id=self.agent_id
-                )
-            
-            return AgentResponse(
-                request_id=message.message_id,
-                from_agent=self.agent_id, 
-                to_agent=message.from_agent,
-                status=ResponseStatus.SUCCESS,
-                result={
-                    'analysis': analysis_result.to_dict(),
-                    'session_id': session_id
-                }
+            target_analysis = await self.target_analyzer.analyze_target_audience(
+                brief_analysis
             )
             
-        except Exception as e:
-            raise Exception(f"Target analysis failed: {e}")
-    
-    async def _create_strategic_direction(self, message: AgentMessage) -> AgentResponse:
-        """Create comprehensive strategic direction"""
-        try:
-            session_id = message.session_id
-            campaign_id = message.payload.get('campaign_id', str(uuid.uuid4()))
-            
-            if not session_id:
-                raise ValueError("No session ID provided")
-            
-            # Get all analysis results from shared memory
-            brief_analysis_data = self.shared_memory.get_data(session_id, 'brief_analysis')
-            brand_analysis_data = self.shared_memory.get_data(session_id, 'brand_analysis')
-            target_analysis_data = self.shared_memory.get_data(session_id, 'target_analysis')
-            logo_processing_data = self.shared_memory.get_data(session_id, 'logo_processing')
-            
-            if not all([brief_analysis_data, brand_analysis_data, target_analysis_data]):
-                raise ValueError("Missing analysis data. Please complete all analysis steps first.")
-            
-            # Recreate analysis objects
-            brief_analysis = BriefAnalysisResult.from_dict(brief_analysis_data)
-            brand_analysis = BrandAnalysisResult.from_dict(brand_analysis_data)
-            target_analysis = TargetAnalysisResult.from_dict(target_analysis_data)
-            logo_processing = LogoProcessingResult.from_dict(logo_processing_data) if logo_processing_data else None
-            
-            # Create strategic direction
-            strategic_direction = await self._synthesize_strategic_direction(
-                session_id, campaign_id, brief_analysis, brand_analysis, target_analysis, logo_processing
+            # Create campaign data
+            campaign_data = CampaignData(
+                campaign_id=campaign_id,
+                brief=brief_analysis,
+                brand_assets=processed_assets,
+                target_audience=target_analysis,
+                mood_board=brand_analysis.get("mood_board", []),
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow()
             )
             
             # Store in shared memory
-            self.shared_memory.set_data(
-                session_id,
-                'strategic_direction',
-                strategic_direction.to_dict(),
-                agent_id=self.agent_id
-            )
+            await self.shared_memory.set_campaign_data(campaign_id, campaign_data)
             
-            # Dispatch event for workflow continuation
-            self.event_dispatcher.dispatch_event(
-                EventType.DESIGN_CREATED,
-                source=self.agent_id,
-                data={
-                    'session_id': session_id,
-                    'campaign_id': campaign_id,
-                    'strategic_direction_ready': True
-                },
-                session_id=session_id
-            )
-            
-            self._stats['campaigns_analyzed'] += 1
-            
-            return AgentResponse(
-                request_id=message.message_id,
-                from_agent=self.agent_id,
-                to_agent=message.from_agent,
-                status=ResponseStatus.SUCCESS,
-                result={
-                    'strategic_direction': strategic_direction.to_dict(),
-                    'session_id': session_id,
-                    'campaign_id': campaign_id
-                }
-            )
+            logger.info(f"Campaign {campaign_id} created and analyzed successfully")
+            return campaign_id
             
         except Exception as e:
-            raise Exception(f"Strategic direction creation failed: {e}")
+            logger.error(f"Failed to create campaign: {e}")
+            raise
     
-    async def _synthesize_strategic_direction(self,
-                                            session_id: str,
-                                            campaign_id: str,
-                                            brief_analysis: BriefAnalysisResult,
-                                            brand_analysis: BrandAnalysisResult,
-                                            target_analysis: TargetAnalysisResult,
-                                            logo_processing: Optional[LogoProcessingResult]) -> StrategicDirection:
-        """Synthesize all analysis into strategic direction"""
-        
-        # Create mood board based on brief and brand
-        mood_board = {
-            'style': brief_analysis.design_requirements.get('style', 'modern'),
-            'tone': brief_analysis.tone_of_voice,
-            'emotions': target_analysis.emotional_triggers,
-            'visual_themes': brand_analysis.visual_themes
-        }
-        
-        # Create color palette
-        color_palette = brand_analysis.color_palette
-        if not color_palette and logo_processing:
-            color_palette = logo_processing.extracted_colors
-        
-        # Design direction
-        design_direction = {
-            'primary_message': brief_analysis.key_messages[0] if brief_analysis.key_messages else "",
-            'visual_hierarchy': brief_analysis.design_requirements.get('hierarchy', 'message-first'),
-            'layout_style': self._determine_layout_style(brief_analysis, target_analysis),
-            'imagery_style': brand_analysis.imagery_style,
-            'typography_direction': self._determine_typography_direction(brand_analysis, target_analysis)
-        }
-        
-        # Messaging strategy
-        messaging_strategy = {
-            'primary_message': brief_analysis.key_messages[0] if brief_analysis.key_messages else "",
-            'secondary_messages': brief_analysis.key_messages[1:3],
-            'cta_text': brief_analysis.call_to_action,
-            'value_proposition': brief_analysis.value_proposition,
-            'tone_guidelines': brief_analysis.tone_of_voice
-        }
-        
-        # Calculate validation scores
-        brand_consistency_score = self._calculate_brand_consistency(brand_analysis, brief_analysis)
-        target_alignment_score = self._calculate_target_alignment(target_analysis, brief_analysis)
-        
-        # Overall confidence score
-        confidence_score = (brand_consistency_score + target_alignment_score) / 2
-        
-        return StrategicDirection(
-            session_id=session_id,
-            campaign_id=campaign_id,
-            brief_analysis=brief_analysis,
-            brand_analysis=brand_analysis,
-            target_analysis=target_analysis,
-            logo_processing=logo_processing,
-            mood_board=mood_board,
-            color_palette=color_palette,
-            design_direction=design_direction,
-            messaging_strategy=messaging_strategy,
-            brand_consistency_score=brand_consistency_score,
-            target_alignment_score=target_alignment_score,
-            confidence_score=confidence_score
-        )
-    
-    def _determine_layout_style(self, brief_analysis: BriefAnalysisResult, target_analysis: TargetAnalysisResult) -> str:
-        """Determine optimal layout style"""
-        # Logic to determine layout based on brief and target
-        if 'professional' in target_analysis.psychographics:
-            return 'clean-professional'
-        elif 'young' in target_analysis.demographics.get('age', ''):
-            return 'dynamic-modern'
-        elif brief_analysis.campaign_type == 'product_launch':
-            return 'hero-focused'
-        else:
-            return 'balanced-hierarchy'
-    
-    def _determine_typography_direction(self, brand_analysis: BrandAnalysisResult, target_analysis: TargetAnalysisResult) -> Dict[str, str]:
-        """Determine typography direction"""
-        return {
-            'primary_font_style': brand_analysis.brand_personality.get('font_style', 'modern-sans'),
-            'hierarchy_approach': 'clear-contrast',
-            'readability_priority': 'high' if 'accessibility' in target_analysis.preferences else 'medium'
-        }
-    
-    def _calculate_brand_consistency(self, brand_analysis: BrandAnalysisResult, brief_analysis: BriefAnalysisResult) -> float:
-        """Calculate brand consistency score"""
-        score = 0.0
-        factors = 0
-        
-        # Check tone alignment
-        if brand_analysis.brand_personality.get('tone') == brief_analysis.tone_of_voice:
-            score += 1.0
-        factors += 1
-        
-        # Check message alignment
-        brand_values = brand_analysis.brand_values
-        brief_messages = brief_analysis.key_messages
-        if any(value.lower() in ' '.join(brief_messages).lower() for value in brand_values):
-            score += 1.0
-        factors += 1
-        
-        # Check visual alignment
-        if brand_analysis.visual_themes:
-            score += 1.0
-        factors += 1
-        
-        return (score / factors) * 10 if factors > 0 else 5.0
-    
-    def _calculate_target_alignment(self, target_analysis: TargetAnalysisResult, brief_analysis: BriefAnalysisResult) -> float:
-        """Calculate target audience alignment score"""
-        score = 0.0
-        factors = 0
-        
-        # Check emotional trigger alignment
-        if target_analysis.emotional_triggers and brief_analysis.emotional_appeal:
-            if any(trigger in brief_analysis.emotional_appeal for trigger in target_analysis.emotional_triggers):
-                score += 1.0
-        factors += 1
-        
-        # Check communication style alignment
-        if target_analysis.communication_preferences.get('style') == brief_analysis.tone_of_voice:
-            score += 1.0
-        factors += 1
-        
-        # Check platform alignment
-        brief_platforms = brief_analysis.platforms
-        target_platforms = target_analysis.preferred_platforms
-        if any(platform in brief_platforms for platform in target_platforms):
-            score += 1.0
-        factors += 1
-        
-        return (score / factors) * 10 if factors > 0 else 5.0
-    
-    async def _validate_brand_assets(self, message: AgentMessage) -> AgentResponse:
-        """Validate brand assets"""
+    async def _handle_analyze_brief(self, message):
+        """Handle brief analysis request"""
         try:
-            assets = message.payload.get('assets', {})
+            data = message.payload.get("data", {})
+            brief = data.get("brief")
             
-            validation_results = {
-                'valid_assets': [],
-                'invalid_assets': [],
-                'warnings': [],
-                'recommendations': []
-            }
+            if not brief:
+                raise ValueError("Brief is required for analysis")
             
-            # Validate each asset
-            for asset_name, asset_data in assets.items():
-                is_valid, issues = await self._validate_single_asset(asset_name, asset_data)
-                
-                if is_valid:
-                    validation_results['valid_assets'].append(asset_name)
-                else:
-                    validation_results['invalid_assets'].append({
-                        'asset': asset_name,
-                        'issues': issues
-                    })
+            # Analyze brief
+            analysis = await self.brief_analyzer.analyze_brief(brief)
             
-            return AgentResponse(
-                request_id=message.message_id,
-                from_agent=self.agent_id,
-                to_agent=message.from_agent,
-                status=ResponseStatus.SUCCESS,
-                result=validation_results
+            # Send response
+            response = MessageProtocol.create_response(
+                message, self.agent_id, True, {"analysis": analysis}
             )
+            await self.message_queue.publish(message.reply_to or message.sender, response)
             
         except Exception as e:
-            raise Exception(f"Asset validation failed: {e}")
+            logger.error(f"Brief analysis failed: {e}")
+            response = MessageProtocol.create_response(
+                message, self.agent_id, False, error=str(e)
+            )
+            await self.message_queue.publish(message.reply_to or message.sender, response)
     
-    async def _validate_single_asset(self, asset_name: str, asset_data: Dict[str, Any]) -> tuple:
-        """Validate individual asset"""
-        issues = []
-        
-        # Check file format
-        if 'format' in asset_data:
-            if asset_data['format'].lower() not in self.config.supported_logo_formats:
-                issues.append(f"Unsupported format: {asset_data['format']}")
-        
-        # Check file size
-        if 'size_mb' in asset_data:
-            if asset_data['size_mb'] > self.config.logo_max_size_mb:
-                issues.append(f"File too large: {asset_data['size_mb']}MB > {self.config.logo_max_size_mb}MB")
-        
-        # Check dimensions if available
-        if 'dimensions' in asset_data:
-            width, height = asset_data['dimensions']
-            if width < 100 or height < 100:
-                issues.append("Resolution too low for quality output")
-        
-        return len(issues) == 0, issues
-    
-    def _handle_ping(self, message: AgentMessage) -> AgentResponse:
-        """Handle ping message"""
-        return AgentResponse(
-            request_id=message.message_id,
-            from_agent=self.agent_id,
-            to_agent=message.from_agent,
-            status=ResponseStatus.SUCCESS,
-            result={
-                'pong': True,
-                'agent_id': self.agent_id,
-                'agent_type': self.agent_type.value,
-                'status': 'active',
-                'stats': self.get_stats()
-            }
-        )
-    
-    def _handle_system_error(self, event) -> None:
-        """Handle system error events"""
-        logger.error(f"System error received: {event.data}")
-        self._stats['processing_errors'] += 1
-    
-    def _send_error_response(self, message: AgentMessage, error: str) -> None:
-        """Send error response"""
-        response = AgentResponse(
-            request_id=message.message_id,
-            from_agent=self.agent_id,
-            to_agent=message.from_agent,
-            status=ResponseStatus.ERROR,
-            error=error
-        )
-        
-        self.message_queue.send_response(response)
-        self._stats['processing_errors'] += 1
-    
-    def _update_stats(self, action: str, processing_time: float, success: bool) -> None:
-        """Update agent statistics"""
-        if success:
-            # Update average processing time
-            current_avg = self._stats['average_processing_time']
-            total_processed = sum([
-                self._stats['campaigns_analyzed'],
-                self._stats['logos_processed']
-            ])
+    async def _handle_process_logo(self, message):
+        """Handle logo processing request"""
+        try:
+            data = message.payload.get("data", {})
+            logo_data = data.get("logo")
             
-            if total_processed > 0:
-                self._stats['average_processing_time'] = (
-                    (current_avg * (total_processed - 1) + processing_time) / total_processed
-                )
-            else:
-                self._stats['average_processing_time'] = processing_time
-        else:
-            self._stats['processing_errors'] += 1
+            if not logo_data:
+                raise ValueError("Logo data is required for processing")
+            
+            # Process logo
+            processed_logo = await self.logo_processor.process_logo(logo_data)
+            
+            # Send response
+            response = MessageProtocol.create_response(
+                message, self.agent_id, True, {"processed_logo": processed_logo}
+            )
+            await self.message_queue.publish(message.reply_to or message.sender, response)
+            
+        except Exception as e:
+            logger.error(f"Logo processing failed: {e}")
+            response = MessageProtocol.create_response(
+                message, self.agent_id, False, error=str(e)
+            )
+            await self.message_queue.publish(message.reply_to or message.sender, response)
     
-    def get_stats(self) -> Dict[str, Any]:
-        """Get agent statistics"""
+    async def _handle_extract_brand_info(self, message):
+        """Handle brand information extraction request"""
+        try:
+            data = message.payload.get("data", {})
+            brief_analysis = data.get("brief_analysis")
+            brand_assets = data.get("brand_assets", {})
+            
+            if not brief_analysis:
+                raise ValueError("Brief analysis is required for brand extraction")
+            
+            # Analyze brand
+            brand_analysis = await self.brand_analyzer.analyze_brand(
+                brief_analysis, brand_assets
+            )
+            
+            # Send response
+            response = MessageProtocol.create_response(
+                message, self.agent_id, True, {"brand_analysis": brand_analysis}
+            )
+            await self.message_queue.publish(message.reply_to or message.sender, response)
+            
+        except Exception as e:
+            logger.error(f"Brand analysis failed: {e}")
+            response = MessageProtocol.create_response(
+                message, self.agent_id, False, error=str(e)
+            )
+            await self.message_queue.publish(message.reply_to or message.sender, response)
+    
+    async def _handle_define_strategy(self, message):
+        """Handle strategy definition request"""
+        try:
+            campaign_id = message.payload.get("campaign_id")
+            
+            if not campaign_id:
+                raise ValueError("Campaign ID is required for strategy definition")
+            
+            # Get campaign data
+            campaign_data = await self.shared_memory.get_campaign_data(campaign_id)
+            if not campaign_data:
+                raise ValueError(f"Campaign {campaign_id} not found")
+            
+            # Define strategy
+            strategy = await self._define_campaign_strategy(campaign_data)
+            
+            # Update campaign data with strategy
+            campaign_data.brief["strategy"] = strategy
+            campaign_data.updated_at = datetime.utcnow()
+            await self.shared_memory.set_campaign_data(campaign_id, campaign_data)
+            
+            # Send response
+            response = MessageProtocol.create_response(
+                message, self.agent_id, True, {"strategy": strategy}
+            )
+            await self.message_queue.publish(message.reply_to or message.sender, response)
+            
+            # Notify next agent (Background Designer)
+            background_request = MessageProtocol.create_request(
+                self.agent_id,
+                AgentIdentifiers.BACKGROUND_DESIGNER,
+                WorkflowProtocol.GENERATE_BACKGROUND,
+                {"campaign_id": campaign_id}
+            )
+            await self.message_queue.publish(AgentIdentifiers.BACKGROUND_DESIGNER, background_request)
+            
+        except Exception as e:
+            logger.error(f"Strategy definition failed: {e}")
+            response = MessageProtocol.create_response(
+                message, self.agent_id, False, error=str(e)
+            )
+            await self.message_queue.publish(message.reply_to or message.sender, response)
+    
+    async def _define_campaign_strategy(self, campaign_data: CampaignData) -> Dict[str, Any]:
+        """Define comprehensive campaign strategy"""
+        try:
+            brief = campaign_data.brief
+            brand_assets = campaign_data.brand_assets
+            target_audience = campaign_data.target_audience
+            
+            # Extract key strategy elements
+            strategy = {
+                "visual_style": self._determine_visual_style(brief, brand_assets),
+                "color_palette": self._extract_color_palette(brand_assets),
+                "typography_style": self._determine_typography_style(brief, target_audience),
+                "layout_preferences": self._determine_layout_preferences(brief),
+                "messaging_strategy": self._define_messaging_strategy(brief, target_audience),
+                "creative_direction": self._define_creative_direction(brief, brand_assets),
+                "constraints": self._extract_constraints(brief),
+                "success_metrics": self._define_success_metrics(brief)
+            }
+            
+            logger.info(f"Strategy defined for campaign {campaign_data.campaign_id}")
+            return strategy
+            
+        except Exception as e:
+            logger.error(f"Failed to define strategy: {e}")
+            raise
+    
+    def _determine_visual_style(self, brief: Dict[str, Any], 
+                               brand_assets: Dict[str, Any]) -> Dict[str, Any]:
+        """Determine visual style based on brief and brand assets"""
+        # Extract mood and tone from brief
+        mood = brief.get("mood", "professional")
+        tone = brief.get("tone", "neutral")
+        industry = brief.get("industry", "general")
+        
+        # Analyze logo if available
+        logo_style = "modern"
+        if "logo" in brand_assets and "analysis" in brand_assets["logo"]:
+            logo_analysis = brand_assets["logo"]["analysis"]
+            logo_style = logo_analysis.get("style", "modern")
+        
         return {
-            **self._stats,
-            'active_sessions': len(self._active_sessions),
-            'queue_size': self._processing_queue.qsize(),
-            'uptime': (datetime.now() - datetime.now()).total_seconds(),  # This would track actual start time
-            'status': 'running' if self._running else 'stopped'
+            "mood": mood,
+            "tone": tone,
+            "style": logo_style,
+            "industry": industry,
+            "aesthetic": self._map_mood_to_aesthetic(mood),
+            "visual_hierarchy": "clear" if tone == "professional" else "dynamic"
         }
+    
+    def _extract_color_palette(self, brand_assets: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract color palette from brand assets"""
+        if "logo" in brand_assets and "colors" in brand_assets["logo"]:
+            return brand_assets["logo"]["colors"]
+        
+        # Default color palette
+        return {
+            "primary": "#2563eb",
+            "secondary": "#64748b", 
+            "accent": "#f59e0b",
+            "neutral": "#f8fafc",
+            "text": "#1e293b"
+        }
+    
+    def _determine_typography_style(self, brief: Dict[str, Any], 
+                                  target_audience: Dict[str, Any]) -> Dict[str, Any]:
+        """Determine typography style"""
+        industry = brief.get("industry", "general")
+        audience_age = target_audience.get("demographics", {}).get("age_range", "25-45")
+        tone = brief.get("tone", "neutral")
+        
+        # Map characteristics to font choices
+        if industry in ["tech", "startup", "software"]:
+            font_family = "modern_sans"
+        elif industry in ["finance", "law", "consulting"]:
+            font_family = "traditional_serif"
+        elif industry in ["creative", "design", "arts"]:
+            font_family = "creative_display"
+        else:
+            font_family = "versatile_sans"
+        
+        return {
+            "primary_font": font_family,
+            "font_weight": "bold" if tone == "confident" else "medium",
+            "font_size_scale": "large" if "young" in audience_age else "medium",
+            "letter_spacing": "normal",
+            "line_height": "comfortable"
+        }
+    
+    def _determine_layout_preferences(self, brief: Dict[str, Any]) -> Dict[str, Any]:
+        """Determine layout preferences"""
+        message_complexity = len(brief.get("key_messages", []))
+        cta_importance = brief.get("cta_importance", "medium")
+        
+        return {
+            "layout_style": "minimal" if message_complexity <= 2 else "structured",
+            "cta_prominence": cta_importance,
+            "logo_placement": "top-left",
+            "text_alignment": "left",
+            "spacing": "generous" if message_complexity <= 2 else "compact"
+        }
+    
+    def _define_messaging_strategy(self, brief: Dict[str, Any], 
+                                 target_audience: Dict[str, Any]) -> Dict[str, Any]:
+        """Define messaging strategy"""
+        return {
+            "primary_message": brief.get("primary_message", ""),
+            "secondary_messages": brief.get("key_messages", []),
+            "cta_text": brief.get("cta_text", "Learn More"),
+            "tone_of_voice": target_audience.get("communication_style", "professional"),
+            "value_proposition": brief.get("value_proposition", ""),
+            "urgency_level": brief.get("urgency", "medium")
+        }
+    
+    def _define_creative_direction(self, brief: Dict[str, Any], 
+                                 brand_assets: Dict[str, Any]) -> Dict[str, Any]:
+        """Define creative direction"""
+        return {
+            "concept": brief.get("concept", "product_focused"),
+            "imagery_style": "clean_modern",
+            "composition": "balanced",
+            "contrast_level": "medium",
+            "texture_usage": "minimal",
+            "effects": "subtle"
+        }
+    
+    def _extract_constraints(self, brief: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract design constraints"""
+        return {
+            "dimensions": brief.get("dimensions", {"width": 728, "height": 90}),
+            "file_size_limit": brief.get("file_size_limit", "150KB"),
+            "format_requirements": brief.get("formats", ["SVG", "PNG"]),
+            "brand_guidelines": brief.get("brand_guidelines", {}),
+            "legal_requirements": brief.get("legal_text", []),
+            "accessibility": brief.get("accessibility_requirements", {})
+        }
+    
+    def _define_success_metrics(self, brief: Dict[str, Any]) -> Dict[str, Any]:
+        """Define success metrics"""
+        return {
+            "primary_kpi": brief.get("primary_kpi", "click_through_rate"),
+            "target_ctr": brief.get("target_ctr", 0.02),
+            "conversion_goal": brief.get("conversion_goal", "lead_generation"),
+            "brand_recall": brief.get("brand_recall_target", 0.25),
+            "engagement_metrics": brief.get("engagement_metrics", ["clicks", "views"])
+        }
+    
+    def _map_mood_to_aesthetic(self, mood: str) -> str:
+        """Map mood to aesthetic style"""
+        mood_mapping = {
+            "professional": "clean_corporate",
+            "playful": "vibrant_friendly",
+            "elegant": "sophisticated_minimal",
+            "energetic": "dynamic_bold",
+            "trustworthy": "stable_reliable",
+            "innovative": "modern_cutting_edge",
+            "warm": "approachable_human",
+            "premium": "luxury_refined"
+        }
+        return mood_mapping.get(mood, "balanced_versatile")
+    
+    async def get_campaign_status(self, campaign_id: str) -> Dict[str, Any]:
+        """Get current campaign status"""
+        try:
+            campaign_data = await self.shared_memory.get_campaign_data(campaign_id)
+            if not campaign_data:
+                return {"status": "not_found"}
+            
+            return {
+                "status": "active",
+                "campaign_id": campaign_id,
+                "created_at": campaign_data.created_at.isoformat(),
+                "updated_at": campaign_data.updated_at.isoformat(),
+                "has_strategy": "strategy" in campaign_data.brief,
+                "brief_analyzed": bool(campaign_data.brief),
+                "assets_processed": bool(campaign_data.brand_assets),
+                "target_analyzed": bool(campaign_data.target_audience)
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get campaign status: {e}")
+            return {"status": "error", "error": str(e)}

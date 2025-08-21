@@ -1,247 +1,295 @@
 """
-Data serialization utilities for different data types
+Serializers Module
+
+Handles serialization and deserialization of data structures
+for the multi-agent system.
 """
 
 import json
 import pickle
 import base64
-from typing import Any, Dict, List, Union, Optional
+from typing import Any, Dict, List, Union
 from datetime import datetime
-from dataclasses import asdict, is_dataclass
-import logging
+from dataclasses import is_dataclass, asdict
+from enum import Enum
+import numpy as np
+from PIL import Image
+import io
+from structlog import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
-class DataSerializer:
+
+class SerializationFormat(Enum):
+    """Supported serialization formats"""
+    JSON = "json"
+    PICKLE = "pickle"
+    BASE64 = "base64"
+
+
+class AgentDataSerializer:
     """
-    Generic data serializer with support for various data types
-    Handles JSON serialization with custom type support
+    Serializer for agent data structures
     """
     
     @staticmethod
-    def serialize(data: Any, format: str = "json") -> Union[str, bytes]:
-        """Serialize data to specified format"""
-        if format == "json":
-            return DataSerializer._serialize_json(data)
-        elif format == "pickle":
-            return DataSerializer._serialize_pickle(data)
-        else:
-            raise ValueError(f"Unsupported format: {format}")
-    
-    @staticmethod
-    def deserialize(data: Union[str, bytes], format: str = "json") -> Any:
-        """Deserialize data from specified format"""
-        if format == "json":
-            return DataSerializer._deserialize_json(data)
-        elif format == "pickle":
-            return DataSerializer._deserialize_pickle(data)
-        else:
-            raise ValueError(f"Unsupported format: {format}")
-    
-    @staticmethod
-    def _serialize_json(data: Any) -> str:
-        """JSON serialization with custom encoder"""
-        return json.dumps(data, cls=CustomJSONEncoder, ensure_ascii=False, indent=2)
-    
-    @staticmethod
-    def _deserialize_json(data: str) -> Any:
-        """JSON deserialization with custom decoder"""
-        return json.loads(data, object_hook=custom_json_decoder)
-    
-    @staticmethod
-    def _serialize_pickle(data: Any) -> bytes:
-        """Pickle serialization"""
-        return pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
-    
-    @staticmethod
-    def _deserialize_pickle(data: bytes) -> Any:
-        """Pickle deserialization"""
-        return pickle.loads(data)
-
-class CustomJSONEncoder(json.JSONEncoder):
-    """Custom JSON encoder for special data types"""
-    
-    def default(self, obj):
+    def _json_serializer(obj) -> Any:
+        """Custom JSON serializer for complex objects"""
         if isinstance(obj, datetime):
-            return {
-                '__type__': 'datetime',
-                'value': obj.isoformat()
-            }
+            return obj.isoformat()
+        elif isinstance(obj, Enum):
+            return obj.value
         elif is_dataclass(obj):
+            return asdict(obj)
+        elif isinstance(obj, np.ndarray):
             return {
-                '__type__': 'dataclass',
-                'class_name': obj.__class__.__name__,
-                'value': asdict(obj)
+                "__numpy_array__": True,
+                "dtype": str(obj.dtype),
+                "shape": obj.shape,
+                "data": base64.b64encode(obj.tobytes()).decode('utf-8')
             }
-        elif isinstance(obj, bytes):
+        elif isinstance(obj, Image.Image):
+            buffer = io.BytesIO()
+            obj.save(buffer, format='PNG')
             return {
-                '__type__': 'bytes',
-                'value': base64.b64encode(obj).decode('utf-8')
-            }
-        elif isinstance(obj, set):
-            return {
-                '__type__': 'set',
-                'value': list(obj)
+                "__pil_image__": True,
+                "format": "PNG",
+                "data": base64.b64encode(buffer.getvalue()).decode('utf-8')
             }
         elif hasattr(obj, '__dict__'):
-            return {
-                '__type__': 'object',
-                'class_name': obj.__class__.__name__,
-                'value': obj.__dict__
-            }
+            return obj.__dict__
+        else:
+            return str(obj)
+    
+    @staticmethod
+    def _json_deserializer(obj) -> Any:
+        """Custom JSON deserializer for complex objects"""
+        if isinstance(obj, dict):
+            if "__numpy_array__" in obj:
+                data = base64.b64decode(obj["data"])
+                return np.frombuffer(data, dtype=obj["dtype"]).reshape(obj["shape"])
+            elif "__pil_image__" in obj:
+                data = base64.b64decode(obj["data"])
+                return Image.open(io.BytesIO(data))
+        return obj
+    
+    @classmethod
+    def serialize(cls, data: Any, format: SerializationFormat = SerializationFormat.JSON) -> str:
+        """
+        Serialize data to string format
         
-        return super().default(obj)
-
-def custom_json_decoder(dct):
-    """Custom JSON decoder for special data types"""
-    if '__type__' in dct:
-        obj_type = dct['__type__']
-        value = dct['value']
-        
-        if obj_type == 'datetime':
-            return datetime.fromisoformat(value)
-        elif obj_type == 'bytes':
-            return base64.b64decode(value.encode('utf-8'))
-        elif obj_type == 'set':
-            return set(value)
-        # Note: dataclass and object reconstruction would need class imports
-        # which is complex for a generic deserializer
-        
-    return dct
-
-class DesignSerializer:
-    """
-    Specialized serializer for design data structures
-    Handles blueprints, design versions, and related metadata
-    """
-    
-    @staticmethod
-    def serialize_blueprint(blueprint: Dict[str, Any]) -> str:
-        """Serialize design blueprint"""
-        try:
-            # Validate blueprint structure
-            DesignSerializer._validate_blueprint(blueprint)
-            return DataSerializer.serialize(blueprint, "json")
-        except Exception as e:
-            logger.error(f"Error serializing blueprint: {e}")
-            raise
-    
-    @staticmethod
-    def deserialize_blueprint(data: str) -> Dict[str, Any]:
-        """Deserialize design blueprint"""
-        try:
-            blueprint = DataSerializer.deserialize(data, "json")
-            DesignSerializer._validate_blueprint(blueprint)
-            return blueprint
-        except Exception as e:
-            logger.error(f"Error deserializing blueprint: {e}")
-            raise
-    
-    @staticmethod
-    def _validate_blueprint(blueprint: Dict[str, Any]) -> None:
-        """Validate blueprint structure"""
-        required_fields = ['version', 'canvas', 'elements']
-        for field in required_fields:
-            if field not in blueprint:
-                raise ValueError(f"Missing required field in blueprint: {field}")
-        
-        # Validate canvas
-        canvas = blueprint['canvas']
-        canvas_required = ['width', 'height']
-        for field in canvas_required:
-            if field not in canvas:
-                raise ValueError(f"Missing required canvas field: {field}")
-        
-        # Validate elements
-        if not isinstance(blueprint['elements'], list):
-            raise ValueError("Blueprint elements must be a list")
-    
-    @staticmethod
-    def serialize_design_version(version_data: Dict[str, Any]) -> str:
-        """Serialize design version data"""
-        return DataSerializer.serialize(version_data, "json")
-    
-    @staticmethod
-    def deserialize_design_version(data: str) -> Dict[str, Any]:
-        """Deserialize design version data"""
-        return DataSerializer.deserialize(data, "json")
-
-class FeedbackSerializer:
-    """
-    Specialized serializer for feedback data
-    Handles user feedback, design critique, and improvement suggestions
-    """
-    
-    @staticmethod
-    def serialize_feedback(feedback: Dict[str, Any]) -> str:
-        """Serialize feedback data"""
-        try:
-            # Add timestamp if not present
-            if 'timestamp' not in feedback:
-                feedback['timestamp'] = datetime.now()
+        Args:
+            data: Data to serialize
+            format: Serialization format
             
-            # Validate feedback structure
-            FeedbackSerializer._validate_feedback(feedback)
-            return DataSerializer.serialize(feedback, "json")
+        Returns:
+            Serialized string
+        """
+        try:
+            if format == SerializationFormat.JSON:
+                return json.dumps(data, default=cls._json_serializer, ensure_ascii=False)
+            elif format == SerializationFormat.PICKLE:
+                pickled_data = pickle.dumps(data)
+                return base64.b64encode(pickled_data).decode('utf-8')
+            elif format == SerializationFormat.BASE64:
+                if isinstance(data, str):
+                    return base64.b64encode(data.encode('utf-8')).decode('utf-8')
+                else:
+                    json_data = json.dumps(data, default=cls._json_serializer)
+                    return base64.b64encode(json_data.encode('utf-8')).decode('utf-8')
+            else:
+                raise ValueError(f"Unsupported serialization format: {format}")
         except Exception as e:
-            logger.error(f"Error serializing feedback: {e}")
+            logger.error(f"Serialization failed: {e}")
             raise
     
-    @staticmethod
-    def deserialize_feedback(data: str) -> Dict[str, Any]:
-        """Deserialize feedback data"""
-        try:
-            feedback = DataSerializer.deserialize(data, "json")
-            FeedbackSerializer._validate_feedback(feedback)
-            return feedback
-        except Exception as e:
-            logger.error(f"Error deserializing feedback: {e}")
-            raise
-    
-    @staticmethod
-    def _validate_feedback(feedback: Dict[str, Any]) -> None:
-        """Validate feedback structure"""
-        required_fields = ['type', 'content']
-        for field in required_fields:
-            if field not in feedback:
-                raise ValueError(f"Missing required field in feedback: {field}")
+    @classmethod
+    def deserialize(cls, data: str, format: SerializationFormat = SerializationFormat.JSON) -> Any:
+        """
+        Deserialize string data back to original format
         
-        # Validate feedback type
-        valid_types = ['user', 'agent', 'system', 'automated']
-        if feedback['type'] not in valid_types:
-            raise ValueError(f"Invalid feedback type: {feedback['type']}")
-    
-    @staticmethod
-    def serialize_feedback_batch(feedback_list: List[Dict[str, Any]]) -> str:
-        """Serialize multiple feedback items"""
-        serialized_feedback = []
-        for feedback in feedback_list:
-            try:
-                serialized_feedback.append(DataSerializer.deserialize(
-                    FeedbackSerializer.serialize_feedback(feedback), "json"
-                ))
-            except Exception as e:
-                logger.error(f"Error serializing feedback item: {e}")
-                continue
-        
-        return DataSerializer.serialize(serialized_feedback, "json")
-    
-    @staticmethod
-    def deserialize_feedback_batch(data: str) -> List[Dict[str, Any]]:
-        """Deserialize multiple feedback items"""
-        try:
-            feedback_list = DataSerializer.deserialize(data, "json")
-            validated_feedback = []
+        Args:
+            data: Serialized string data
+            format: Serialization format used
             
-            for feedback in feedback_list:
+        Returns:
+            Deserialized data
+        """
+        try:
+            if format == SerializationFormat.JSON:
+                return json.loads(data, object_hook=cls._json_deserializer)
+            elif format == SerializationFormat.PICKLE:
+                pickled_data = base64.b64decode(data.encode('utf-8'))
+                return pickle.loads(pickled_data)
+            elif format == SerializationFormat.BASE64:
+                decoded_data = base64.b64decode(data.encode('utf-8')).decode('utf-8')
                 try:
-                    FeedbackSerializer._validate_feedback(feedback)
-                    validated_feedback.append(feedback)
-                except Exception as e:
-                    logger.error(f"Error validating feedback item: {e}")
-                    continue
-            
-            return validated_feedback
+                    return json.loads(decoded_data, object_hook=cls._json_deserializer)
+                except json.JSONDecodeError:
+                    return decoded_data
+            else:
+                raise ValueError(f"Unsupported serialization format: {format}")
         except Exception as e:
-            logger.error(f"Error deserializing feedback batch: {e}")
+            logger.error(f"Deserialization failed: {e}")
             raise
+    
+    @classmethod
+    def serialize_campaign_brief(cls, brief: Dict[str, Any]) -> str:
+        """Serialize campaign brief"""
+        return cls.serialize(brief, SerializationFormat.JSON)
+    
+    @classmethod
+    def deserialize_campaign_brief(cls, brief_data: str) -> Dict[str, Any]:
+        """Deserialize campaign brief"""
+        return cls.deserialize(brief_data, SerializationFormat.JSON)
+    
+    @classmethod
+    def serialize_design_blueprint(cls, blueprint: Dict[str, Any]) -> str:
+        """Serialize design blueprint"""
+        return cls.serialize(blueprint, SerializationFormat.JSON)
+    
+    @classmethod
+    def deserialize_design_blueprint(cls, blueprint_data: str) -> Dict[str, Any]:
+        """Deserialize design blueprint"""
+        return cls.deserialize(blueprint_data, SerializationFormat.JSON)
+    
+    @classmethod
+    def serialize_agent_state(cls, state: Dict[str, Any]) -> str:
+        """Serialize agent state"""
+        return cls.serialize(state, SerializationFormat.JSON)
+    
+    @classmethod
+    def deserialize_agent_state(cls, state_data: str) -> Dict[str, Any]:
+        """Deserialize agent state"""
+        return cls.deserialize(state_data, SerializationFormat.JSON)
+    
+    @classmethod
+    def serialize_feedback(cls, feedback: List[Dict[str, Any]]) -> str:
+        """Serialize feedback data"""
+        return cls.serialize(feedback, SerializationFormat.JSON)
+    
+    @classmethod
+    def deserialize_feedback(cls, feedback_data: str) -> List[Dict[str, Any]]:
+        """Deserialize feedback data"""
+        return cls.deserialize(feedback_data, SerializationFormat.JSON)
+    
+    @classmethod
+    def serialize_image_data(cls, image: Image.Image) -> str:
+        """Serialize PIL Image to base64 string"""
+        buffer = io.BytesIO()
+        image.save(buffer, format='PNG')
+        return base64.b64encode(buffer.getvalue()).decode('utf-8')
+    
+    @classmethod
+    def deserialize_image_data(cls, image_data: str) -> Image.Image:
+        """Deserialize base64 string to PIL Image"""
+        data = base64.b64decode(image_data)
+        return Image.open(io.BytesIO(data))
+    
+    @classmethod
+    def serialize_numpy_array(cls, array: np.ndarray) -> str:
+        """Serialize numpy array to base64 string"""
+        return base64.b64encode(array.tobytes()).decode('utf-8')
+    
+    @classmethod
+    def deserialize_numpy_array(cls, array_data: str, dtype: str, shape: tuple) -> np.ndarray:
+        """Deserialize base64 string to numpy array"""
+        data = base64.b64decode(array_data)
+        return np.frombuffer(data, dtype=dtype).reshape(shape)
+
+
+class MessageSerializer:
+    """
+    Serializer for inter-agent messages
+    """
+    
+    @classmethod
+    def serialize_message(cls, message: Dict[str, Any]) -> str:
+        """Serialize inter-agent message"""
+        # Add timestamp if not present
+        if "timestamp" not in message:
+            message["timestamp"] = datetime.utcnow().isoformat()
+        
+        return AgentDataSerializer.serialize(message, SerializationFormat.JSON)
+    
+    @classmethod
+    def deserialize_message(cls, message_data: str) -> Dict[str, Any]:
+        """Deserialize inter-agent message"""
+        message = AgentDataSerializer.deserialize(message_data, SerializationFormat.JSON)
+        
+        # Convert timestamp back to datetime object
+        if "timestamp" in message:
+            message["timestamp"] = datetime.fromisoformat(message["timestamp"])
+        
+        return message
+
+
+class ConfigSerializer:
+    """
+    Serializer for configuration data
+    """
+    
+    @classmethod
+    def serialize_config(cls, config: Dict[str, Any]) -> str:
+        """Serialize configuration data"""
+        return AgentDataSerializer.serialize(config, SerializationFormat.JSON)
+    
+    @classmethod
+    def deserialize_config(cls, config_data: str) -> Dict[str, Any]:
+        """Deserialize configuration data"""
+        return AgentDataSerializer.deserialize(config_data, SerializationFormat.JSON)
+    
+    @classmethod
+    def serialize_agent_config(cls, agent_id: str, config: Dict[str, Any]) -> str:
+        """Serialize agent-specific configuration"""
+        agent_config = {
+            "agent_id": agent_id,
+            "config": config,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        return cls.serialize_config(agent_config)
+    
+    @classmethod
+    def deserialize_agent_config(cls, config_data: str) -> tuple:
+        """Deserialize agent-specific configuration"""
+        data = cls.deserialize_config(config_data)
+        return data["agent_id"], data["config"]
+
+
+class LogSerializer:
+    """
+    Serializer for logging data
+    """
+    
+    @classmethod
+    def serialize_log_entry(cls, level: str, message: str, 
+                          context: Dict[str, Any] = None) -> str:
+        """Serialize log entry"""
+        log_entry = {
+            "level": level,
+            "message": message,
+            "context": context or {},
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        return AgentDataSerializer.serialize(log_entry, SerializationFormat.JSON)
+    
+    @classmethod
+    def deserialize_log_entry(cls, log_data: str) -> Dict[str, Any]:
+        """Deserialize log entry"""
+        log_entry = AgentDataSerializer.deserialize(log_data, SerializationFormat.JSON)
+        
+        # Convert timestamp back to datetime object
+        if "timestamp" in log_entry:
+            log_entry["timestamp"] = datetime.fromisoformat(log_entry["timestamp"])
+        
+        return log_entry
+
+
+def serialize_for_storage(data: Any, format: SerializationFormat = SerializationFormat.JSON) -> str:
+    """Convenience function for serializing data for storage"""
+    return AgentDataSerializer.serialize(data, format)
+
+
+def deserialize_from_storage(data: str, format: SerializationFormat = SerializationFormat.JSON) -> Any:
+    """Convenience function for deserializing data from storage"""
+    return AgentDataSerializer.deserialize(data, format)

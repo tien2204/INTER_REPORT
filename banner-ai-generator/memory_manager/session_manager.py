@@ -1,338 +1,347 @@
 """
-Session management for campaigns and design workflows
+Session Manager Module
+
+Manages sessions and state for campaigns and agent workflows.
+Provides session-based isolation and state persistence.
 """
 
 import uuid
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List
-from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, asdict
 from enum import Enum
-import logging
+import asyncio
+from structlog import get_logger
 
-from .shared_memory import SharedMemoryManager, MemoryEvent, MemoryEventType
-from .memory_store import MemoryStore, PersistentStore, CampaignData
+logger = get_logger(__name__)
 
-logger = logging.getLogger(__name__)
 
 class SessionStatus(Enum):
     """Session status enumeration"""
     ACTIVE = "active"
     PAUSED = "paused"
     COMPLETED = "completed"
+    FAILED = "failed"
     EXPIRED = "expired"
-    ERROR = "error"
+
 
 @dataclass
-class Session:
-    """Session data structure"""
+class AgentSession:
+    """Agent session data structure"""
     session_id: str
-    campaign_id: Optional[str]
-    name: str
-    status: SessionStatus = SessionStatus.ACTIVE
-    created_at: datetime = field(default_factory=datetime.now)
-    last_activity: datetime = field(default_factory=datetime.now)
-    expires_at: Optional[datetime] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    
-    def is_expired(self) -> bool:
-        """Check if session is expired"""
-        if self.expires_at is None:
-            return False
-        return datetime.now() > self.expires_at
-    
-    def update_activity(self) -> None:
-        """Update last activity timestamp"""
-        self.last_activity = datetime.now()
+    agent_id: str
+    campaign_id: str
+    status: SessionStatus
+    state: Dict[str, Any]
+    context: Dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+    expires_at: Optional[datetime]
+
+
+@dataclass
+class WorkflowSession:
+    """Workflow session data structure"""
+    session_id: str
+    campaign_id: str
+    workflow_type: str
+    current_step: str
+    steps_completed: List[str]
+    agent_sessions: List[str]
+    status: SessionStatus
+    metadata: Dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
 
 class SessionManager:
     """
-    Manages sessions for campaigns and design workflows
-    Handles session lifecycle, expiration, and cleanup
+    Session manager for campaigns and agent workflows
     """
     
-    def __init__(self, 
-                 shared_memory: SharedMemoryManager,
-                 memory_store: Optional[MemoryStore] = None,
-                 persistent_store: Optional[PersistentStore] = None,
-                 default_timeout_hours: int = 24):
-        
+    def __init__(self, shared_memory, session_timeout_hours: int = 24):
         self.shared_memory = shared_memory
-        self.memory_store = memory_store or MemoryStore()
-        self.persistent_store = persistent_store
-        self.default_timeout_hours = default_timeout_hours
-        
-        self._sessions: Dict[str, Session] = {}
-        self._campaign_sessions: Dict[str, List[str]] = {}  # campaign_id -> session_ids
-        
-        # Subscribe to memory events
-        self.shared_memory.add_observer(self._handle_memory_event)
+        self.session_timeout = timedelta(hours=session_timeout_hours)
+        self._agent_sessions: Dict[str, AgentSession] = {}
+        self._workflow_sessions: Dict[str, WorkflowSession] = {}
+        self._session_locks: Dict[str, asyncio.Lock] = {}
     
-    def create_session(self, 
-                      name: str,
-                      campaign_id: Optional[str] = None,
-                      timeout_hours: Optional[int] = None,
-                      initial_data: Optional[Dict[str, Any]] = None) -> Session:
-        """Create a new session"""
-        
+    def _get_session_lock(self, session_id: str) -> asyncio.Lock:
+        """Get or create a lock for a session"""
+        if session_id not in self._session_locks:
+            self._session_locks[session_id] = asyncio.Lock()
+        return self._session_locks[session_id]
+    
+    async def create_workflow_session(self, campaign_id: str, workflow_type: str, 
+                                    metadata: Dict[str, Any] = None) -> str:
+        """Create a new workflow session"""
         session_id = str(uuid.uuid4())
-        timeout = timeout_hours or self.default_timeout_hours
-        expires_at = datetime.now() + timedelta(hours=timeout)
         
-        session = Session(
+        workflow_session = WorkflowSession(
             session_id=session_id,
             campaign_id=campaign_id,
-            name=name,
-            expires_at=expires_at,
-            metadata=initial_data or {}
+            workflow_type=workflow_type,
+            current_step="",
+            steps_completed=[],
+            agent_sessions=[],
+            status=SessionStatus.ACTIVE,
+            metadata=metadata or {},
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow()
         )
         
-        # Store session
-        self._sessions[session_id] = session
+        self._workflow_sessions[session_id] = workflow_session
         
-        # Track campaign sessions
-        if campaign_id:
-            if campaign_id not in self._campaign_sessions:
-                self._campaign_sessions[campaign_id] = []
-            self._campaign_sessions[campaign_id].append(session_id)
+        # Store in shared memory
+        await self.shared_memory.set_agent_state(
+            f"workflow_session:{session_id}",
+            asdict(workflow_session)
+        )
         
-        # Create shared memory for session
-        self.shared_memory.create_session_memory(session_id, initial_data)
-        
-        logger.info(f"Created session: {session_id} for campaign: {campaign_id}")
-        return session
+        logger.info(f"Workflow session created: {session_id}")
+        return session_id
     
-    def get_session(self, session_id: str) -> Optional[Session]:
-        """Get session by ID"""
-        session = self._sessions.get(session_id)
-        if session and not session.is_expired():
-            session.update_activity()
-            return session
-        elif session and session.is_expired():
-            self._expire_session(session_id)
-        return None
-    
-    def update_session(self, session_id: str, **kwargs) -> bool:
-        """Update session metadata"""
-        session = self.get_session(session_id)
-        if not session:
-            return False
+    async def create_agent_session(self, agent_id: str, campaign_id: str, 
+                                 workflow_session_id: str = None,
+                                 context: Dict[str, Any] = None) -> str:
+        """Create a new agent session"""
+        session_id = str(uuid.uuid4())
+        expires_at = datetime.utcnow() + self.session_timeout
         
-        for key, value in kwargs.items():
-            if hasattr(session, key):
-                setattr(session, key, value)
-            else:
-                session.metadata[key] = value
+        agent_session = AgentSession(
+            session_id=session_id,
+            agent_id=agent_id,
+            campaign_id=campaign_id,
+            status=SessionStatus.ACTIVE,
+            state={},
+            context=context or {},
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+            expires_at=expires_at
+        )
         
-        session.update_activity()
-        logger.debug(f"Updated session: {session_id}")
-        return True
-    
-    def extend_session(self, session_id: str, hours: int) -> bool:
-        """Extend session expiration time"""
-        session = self.get_session(session_id)
-        if not session:
-            return False
+        self._agent_sessions[session_id] = agent_session
         
-        session.expires_at = datetime.now() + timedelta(hours=hours)
-        session.update_activity()
-        logger.info(f"Extended session {session_id} by {hours} hours")
-        return True
+        # Store in shared memory
+        await self.shared_memory.set_agent_state(
+            f"agent_session:{session_id}",
+            asdict(agent_session)
+        )
+        
+        # Add to workflow session if provided
+        if workflow_session_id:
+            await self.add_agent_to_workflow(workflow_session_id, session_id)
+        
+        logger.info(f"Agent session created: {session_id} for agent {agent_id}")
+        return session_id
     
-    def pause_session(self, session_id: str) -> bool:
+    async def get_agent_session(self, session_id: str) -> Optional[AgentSession]:
+        """Get agent session by ID"""
+        try:
+            # Check local cache first
+            if session_id in self._agent_sessions:
+                session = self._agent_sessions[session_id]
+                if self._is_session_expired(session):
+                    await self.expire_session(session_id)
+                    return None
+                return session
+            
+            # Get from shared memory
+            session_data = await self.shared_memory.get_agent_state(
+                f"agent_session:{session_id}"
+            )
+            
+            if session_data:
+                # Convert datetime strings back to datetime objects
+                session_data["created_at"] = datetime.fromisoformat(session_data["created_at"])
+                session_data["updated_at"] = datetime.fromisoformat(session_data["updated_at"])
+                if session_data.get("expires_at"):
+                    session_data["expires_at"] = datetime.fromisoformat(session_data["expires_at"])
+                
+                session = AgentSession(**session_data)
+                
+                if self._is_session_expired(session):
+                    await self.expire_session(session_id)
+                    return None
+                
+                self._agent_sessions[session_id] = session
+                return session
+            
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get agent session {session_id}: {e}")
+            return None
+    
+    async def get_workflow_session(self, session_id: str) -> Optional[WorkflowSession]:
+        """Get workflow session by ID"""
+        try:
+            # Check local cache first
+            if session_id in self._workflow_sessions:
+                return self._workflow_sessions[session_id]
+            
+            # Get from shared memory
+            session_data = await self.shared_memory.get_agent_state(
+                f"workflow_session:{session_id}"
+            )
+            
+            if session_data:
+                # Convert datetime strings back to datetime objects
+                session_data["created_at"] = datetime.fromisoformat(session_data["created_at"])
+                session_data["updated_at"] = datetime.fromisoformat(session_data["updated_at"])
+                
+                session = WorkflowSession(**session_data)
+                self._workflow_sessions[session_id] = session
+                return session
+            
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get workflow session {session_id}: {e}")
+            return None
+    
+    async def update_agent_session(self, session_id: str, **updates):
+        """Update agent session"""
+        async with self._get_session_lock(session_id):
+            session = await self.get_agent_session(session_id)
+            if session:
+                # Update session data
+                for key, value in updates.items():
+                    if hasattr(session, key):
+                        setattr(session, key, value)
+                
+                session.updated_at = datetime.utcnow()
+                
+                # Update local cache
+                self._agent_sessions[session_id] = session
+                
+                # Update shared memory
+                await self.shared_memory.set_agent_state(
+                    f"agent_session:{session_id}",
+                    asdict(session)
+                )
+                
+                logger.debug(f"Agent session {session_id} updated")
+    
+    async def update_workflow_session(self, session_id: str, **updates):
+        """Update workflow session"""
+        async with self._get_session_lock(session_id):
+            session = await self.get_workflow_session(session_id)
+            if session:
+                # Update session data
+                for key, value in updates.items():
+                    if hasattr(session, key):
+                        setattr(session, key, value)
+                
+                session.updated_at = datetime.utcnow()
+                
+                # Update local cache
+                self._workflow_sessions[session_id] = session
+                
+                # Update shared memory
+                await self.shared_memory.set_agent_state(
+                    f"workflow_session:{session_id}",
+                    asdict(session)
+                )
+                
+                logger.debug(f"Workflow session {session_id} updated")
+    
+    async def add_agent_to_workflow(self, workflow_session_id: str, agent_session_id: str):
+        """Add agent session to workflow session"""
+        workflow_session = await self.get_workflow_session(workflow_session_id)
+        if workflow_session:
+            if agent_session_id not in workflow_session.agent_sessions:
+                workflow_session.agent_sessions.append(agent_session_id)
+                await self.update_workflow_session(
+                    workflow_session_id,
+                    agent_sessions=workflow_session.agent_sessions
+                )
+    
+    async def complete_workflow_step(self, session_id: str, step_name: str):
+        """Mark a workflow step as completed"""
+        workflow_session = await self.get_workflow_session(session_id)
+        if workflow_session:
+            if step_name not in workflow_session.steps_completed:
+                workflow_session.steps_completed.append(step_name)
+                await self.update_workflow_session(
+                    session_id,
+                    steps_completed=workflow_session.steps_completed
+                )
+                
+                logger.info(f"Workflow step '{step_name}' completed in session {session_id}")
+    
+    async def set_workflow_step(self, session_id: str, step_name: str):
+        """Set current workflow step"""
+        await self.update_workflow_session(session_id, current_step=step_name)
+        logger.info(f"Workflow session {session_id} moved to step '{step_name}'")
+    
+    def _is_session_expired(self, session: AgentSession) -> bool:
+        """Check if agent session is expired"""
+        if session.expires_at:
+            return datetime.utcnow() > session.expires_at
+        return False
+    
+    async def expire_session(self, session_id: str):
+        """Mark session as expired"""
+        await self.update_agent_session(session_id, status=SessionStatus.EXPIRED)
+        logger.info(f"Agent session {session_id} expired")
+    
+    async def pause_session(self, session_id: str):
         """Pause a session"""
-        session = self.get_session(session_id)
-        if not session:
-            return False
-        
-        session.status = SessionStatus.PAUSED
-        session.update_activity()
-        logger.info(f"Paused session: {session_id}")
-        return True
+        await self.update_agent_session(session_id, status=SessionStatus.PAUSED)
+        logger.info(f"Agent session {session_id} paused")
     
-    def resume_session(self, session_id: str) -> bool:
+    async def resume_session(self, session_id: str):
         """Resume a paused session"""
-        session = self._sessions.get(session_id)
-        if not session or session.status != SessionStatus.PAUSED:
-            return False
-        
-        if session.is_expired():
-            self._expire_session(session_id)
-            return False
-        
-        session.status = SessionStatus.ACTIVE
-        session.update_activity()
-        logger.info(f"Resumed session: {session_id}")
-        return True
+        await self.update_agent_session(session_id, status=SessionStatus.ACTIVE)
+        logger.info(f"Agent session {session_id} resumed")
     
-    def complete_session(self, session_id: str, save_to_persistent: bool = True) -> bool:
+    async def complete_session(self, session_id: str):
         """Mark session as completed"""
-        session = self.get_session(session_id)
-        if not session:
-            return False
-        
-        session.status = SessionStatus.COMPLETED
-        session.update_activity()
-        
-        # Save to persistent storage if requested
-        if save_to_persistent and self.persistent_store:
-            self._save_session_data(session_id)
-        
-        logger.info(f"Completed session: {session_id}")
-        return True
+        await self.update_agent_session(session_id, status=SessionStatus.COMPLETED)
+        logger.info(f"Agent session {session_id} completed")
     
-    def end_session(self, session_id: str, save_to_persistent: bool = False) -> bool:
-        """End and cleanup session"""
-        session = self._sessions.get(session_id)
-        if not session:
-            return False
+    async def fail_session(self, session_id: str, error_message: str = None):
+        """Mark session as failed"""
+        updates = {"status": SessionStatus.FAILED}
+        if error_message:
+            updates["context"] = {"error": error_message}
         
-        # Save to persistent storage if requested
-        if save_to_persistent and self.persistent_store:
-            self._save_session_data(session_id)
-        
-        # Remove from campaign tracking
-        if session.campaign_id and session.campaign_id in self._campaign_sessions:
-            campaign_sessions = self._campaign_sessions[session.campaign_id]
-            if session_id in campaign_sessions:
-                campaign_sessions.remove(session_id)
-                if not campaign_sessions:
-                    del self._campaign_sessions[session.campaign_id]
-        
-        # Cleanup shared memory
-        self.shared_memory.destroy_session(session_id)
-        
-        # Remove session
-        del self._sessions[session_id]
-        
-        logger.info(f"Ended session: {session_id}")
-        return True
+        await self.update_agent_session(session_id, **updates)
+        logger.error(f"Agent session {session_id} failed: {error_message}")
     
-    def list_sessions(self, campaign_id: Optional[str] = None, 
-                     status: Optional[SessionStatus] = None) -> List[Session]:
-        """List sessions with optional filtering"""
-        sessions = []
-        
-        if campaign_id:
-            session_ids = self._campaign_sessions.get(campaign_id, [])
-            sessions = [self._sessions[sid] for sid in session_ids if sid in self._sessions]
-        else:
-            sessions = list(self._sessions.values())
-        
-        if status:
-            sessions = [s for s in sessions if s.status == status]
-        
-        # Filter out expired sessions
-        active_sessions = []
-        for session in sessions:
-            if session.is_expired():
-                self._expire_session(session.session_id)
-            else:
-                active_sessions.append(session)
-        
-        return active_sessions
-    
-    def get_campaign_sessions(self, campaign_id: str) -> List[Session]:
-        """Get all sessions for a campaign"""
-        return self.list_sessions(campaign_id=campaign_id)
-    
-    def cleanup_expired_sessions(self) -> int:
-        """Cleanup expired sessions"""
-        expired_count = 0
+    async def cleanup_expired_sessions(self):
+        """Clean up expired sessions"""
+        current_time = datetime.utcnow()
         expired_sessions = []
         
-        for session_id, session in self._sessions.items():
-            if session.is_expired():
+        for session_id, session in self._agent_sessions.items():
+            if self._is_session_expired(session):
                 expired_sessions.append(session_id)
         
         for session_id in expired_sessions:
-            self._expire_session(session_id)
-            expired_count += 1
+            await self.expire_session(session_id)
+            del self._agent_sessions[session_id]
         
-        logger.info(f"Cleaned up {expired_count} expired sessions")
-        return expired_count
+        if expired_sessions:
+            logger.info(f"Cleaned up {len(expired_sessions)} expired sessions")
     
-    def get_session_stats(self) -> Dict[str, Any]:
-        """Get session statistics"""
-        total_sessions = len(self._sessions)
-        active_sessions = len([s for s in self._sessions.values() if s.status == SessionStatus.ACTIVE])
-        paused_sessions = len([s for s in self._sessions.values() if s.status == SessionStatus.PAUSED])
-        completed_sessions = len([s for s in self._sessions.values() if s.status == SessionStatus.COMPLETED])
+    async def get_campaign_sessions(self, campaign_id: str) -> List[AgentSession]:
+        """Get all active sessions for a campaign"""
+        sessions = []
+        for session in self._agent_sessions.values():
+            if (session.campaign_id == campaign_id and 
+                session.status == SessionStatus.ACTIVE and
+                not self._is_session_expired(session)):
+                sessions.append(session)
         
-        return {
-            'total_sessions': total_sessions,
-            'active_sessions': active_sessions,
-            'paused_sessions': paused_sessions,
-            'completed_sessions': completed_sessions,
-            'total_campaigns': len(self._campaign_sessions),
-            'memory_usage_mb': self._estimate_memory_usage()
-        }
+        return sessions
     
-    def _expire_session(self, session_id: str) -> None:
-        """Mark session as expired and cleanup if needed"""
-        if session_id in self._sessions:
-            self._sessions[session_id].status = SessionStatus.EXPIRED
-            logger.info(f"Session expired: {session_id}")
-            
-            # Optionally cleanup expired session after some time
-            # For now, just mark as expired but keep in memory
-    
-    def _save_session_data(self, session_id: str) -> None:
-        """Save session data to persistent storage"""
-        if not self.persistent_store:
-            return
+    async def get_agent_sessions_by_type(self, agent_id: str) -> List[AgentSession]:
+        """Get all sessions for a specific agent type"""
+        sessions = []
+        for session in self._agent_sessions.values():
+            if (session.agent_id == agent_id and 
+                session.status == SessionStatus.ACTIVE and
+                not self._is_session_expired(session)):
+                sessions.append(session)
         
-        try:
-            # Get all session data from shared memory
-            session_data = self.shared_memory.get_all_data(session_id)
-            
-            # Save design versions if any
-            if 'design_versions' in session_data:
-                for version_data in session_data['design_versions']:
-                    # This would be handled by the specific agents
-                    pass
-            
-            # Save feedback if any
-            if 'feedback' in session_data:
-                for feedback in session_data['feedback']:
-                    self.persistent_store.save_feedback(session_id, feedback)
-            
-            logger.debug(f"Saved session data to persistent storage: {session_id}")
-            
-        except Exception as e:
-            logger.error(f"Error saving session data: {e}")
-    
-    def _handle_memory_event(self, event: MemoryEvent) -> None:
-        """Handle memory events from shared memory"""
-        try:
-            # Update session activity on any memory event
-            if event.session_id in self._sessions:
-                self._sessions[event.session_id].update_activity()
-            
-            # Handle specific event types
-            if event.event_type == MemoryEventType.BLUEPRINT_CREATED:
-                logger.info(f"Blueprint created in session: {event.session_id}")
-            elif event.event_type == MemoryEventType.FEEDBACK_ADDED:
-                logger.info(f"Feedback added to session: {event.session_id}")
-                
-        except Exception as e:
-            logger.error(f"Error handling memory event: {e}")
-    
-    def _estimate_memory_usage(self) -> float:
-        """Estimate memory usage in MB (rough approximation)"""
-        import sys
-        total_size = 0
-        
-        # Estimate size of sessions
-        total_size += sys.getsizeof(self._sessions)
-        for session in self._sessions.values():
-            total_size += sys.getsizeof(session.__dict__)
-        
-        # Estimate shared memory usage
-        for session_id in self._sessions.keys():
-            try:
-                data = self.shared_memory.get_all_data(session_id)
-                total_size += sys.getsizeof(str(data))
-            except:
-                pass
-        
-        return total_size / (1024 * 1024)  # Convert to MB
+        return sessions

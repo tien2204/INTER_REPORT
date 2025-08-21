@@ -1,18 +1,21 @@
-from .strategist_agent import StrategistAgent
-from .brief_analyzer import BriefAnalyzer, BriefAnalysisResult
-from .logo_processor import LogoProcessor, LogoProcessingResult
-from .brand_analyzer import BrandAnalyzer, BrandAnalysisResult
-from .target_analyzer import TargetAnalyzer, TargetAnalysisResult
+"""
+Strategist Agent Module
 
-__version__ = "1.0.0"
+The Strategist Agent is the main interface with advertisers.
+It analyzes campaign briefs, processes brand assets, and defines
+the overall creative strategy for banner generation.
+"""
+
+from .strategist_agent import StrategistAgent
+from .brief_analyzer import BriefAnalyzer
+from .logo_processor import LogoProcessor
+from .brand_analyzer import BrandAnalyzer
+from .target_analyzer import TargetAudienceAnalyzer
+
 __all__ = [
     "StrategistAgent",
     "BriefAnalyzer",
-    "BriefAnalysisResult", 
-    "LogoProcessor",
-    "LogoProcessingResult",
+    "LogoProcessor", 
     "BrandAnalyzer",
-    "BrandAnalysisResult",
-    "TargetAnalyzer", 
-    "TargetAnalysisResult"
+    "TargetAudienceAnalyzer"
 ]

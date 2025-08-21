@@ -1,28 +1,25 @@
-from .agent_coordinator import AgentCoordinator, WorkflowStatus, WorkflowStep
-from .message_queue import MessageQueue, Message, MessagePriority
-from .event_dispatcher import EventDispatcher, Event, EventType
-from .protocol import (
-    CommunicationProtocol, 
-    MessageProtocol, 
-    WorkflowProtocol,
-    AgentMessage,
-    AgentResponse
-)
+"""
+Communication Module for Multi AI Agent Banner Generator
 
-__version__ = "1.0.0"
+This module handles inter-agent communication, coordination,
+message queuing, and event dispatching.
+"""
+
+from .agent_coordinator import AgentCoordinator, WorkflowStatus, AgentStatus
+from .message_queue import MessageQueue
+from .enhanced_event_dispatcher import EnhancedEventDispatcher
+from .communication_manager import CommunicationManager
+from .protocol import MessageProtocol, EventProtocol, Message, MessageType
+
 __all__ = [
     "AgentCoordinator",
     "WorkflowStatus", 
-    "WorkflowStep",
+    "AgentStatus",
     "MessageQueue",
-    "Message",
-    "MessagePriority",
-    "EventDispatcher",
-    "Event",
-    "EventType",
-    "CommunicationProtocol",
+    "EnhancedEventDispatcher",
+    "CommunicationManager",
     "MessageProtocol",
-    "WorkflowProtocol",
-    "AgentMessage",
-    "AgentResponse"
+    "EventProtocol",
+    "Message",
+    "MessageType"
 ]

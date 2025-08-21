@@ -1,16 +1,18 @@
-from .shared_memory import SharedMemoryManager
-from .memory_store import MemoryStore, PersistentStore
-from .session_manager import SessionManager, Session
-from .serializers import DataSerializer, DesignSerializer, FeedbackSerializer
+"""
+Memory Management Module for Multi AI Agent Banner Generator
 
-__version__ = "1.0.0"
+This module provides shared memory, persistent storage, session management,
+and data serialization capabilities for the multi-agent system.
+"""
+
+from .shared_memory import SharedMemory
+from .memory_store import MemoryStore
+from .session_manager import SessionManager
+from .serializers import AgentDataSerializer
+
 __all__ = [
-    "SharedMemoryManager",
+    "SharedMemory",
     "MemoryStore", 
-    "PersistentStore",
     "SessionManager",
-    "Session",
-    "DataSerializer",
-    "DesignSerializer", 
-    "FeedbackSerializer"
+    "AgentDataSerializer"
 ]

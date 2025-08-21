@@ -1,200 +1,233 @@
 """
-Shared Memory Management for inter-agent communication and data sharing
+Shared Memory Module
+
+Manages shared memory between all AI agents in the system.
+Provides thread-safe access to shared data structures.
 """
 
+import asyncio
+import json
+from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, asdict
+from datetime import datetime
 import threading
-import time
-from typing import Dict, Any, List, Optional, Callable
-from dataclasses import dataclass, field
-from enum import Enum
-import logging
-from contextlib import contextmanager
+import redis.asyncio as redis
+from structlog import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
-class MemoryEventType(Enum):
-    """Types of memory events for observers"""
-    DATA_UPDATED = "data_updated"
-    SESSION_CREATED = "session_created"
-    SESSION_ENDED = "session_ended"
-    BLUEPRINT_CREATED = "blueprint_created"
-    FEEDBACK_ADDED = "feedback_added"
 
 @dataclass
-class MemoryEvent:
-    """Memory event for observer pattern"""
-    event_type: MemoryEventType
-    session_id: str
-    data: Any
-    timestamp: float = field(default_factory=time.time)
-    agent_id: Optional[str] = None
+class CampaignData:
+    """Campaign data structure"""
+    campaign_id: str
+    brief: Dict[str, Any]
+    brand_assets: Dict[str, Any]
+    target_audience: Dict[str, Any]
+    mood_board: List[str]
+    created_at: datetime
+    updated_at: datetime
 
-class SharedMemoryManager:
+
+@dataclass
+class DesignIteration:
+    """Design iteration data structure"""
+    iteration_id: str
+    campaign_id: str
+    background_url: Optional[str]
+    blueprint: Optional[Dict[str, Any]]
+    svg_code: Optional[str]
+    figma_code: Optional[str]
+    feedback: List[Dict[str, Any]]
+    status: str  # "in_progress", "completed", "failed"
+    created_at: datetime
+
+
+class SharedMemory:
     """
-    Thread-safe shared memory manager for multi-agent communication
-    Implements observer pattern for event-driven updates
+    Shared memory manager using Redis for distributed access
     """
     
-    def __init__(self):
-        self._memory: Dict[str, Dict[str, Any]] = {}
-        self._locks: Dict[str, threading.RLock] = {}
-        self._global_lock = threading.RLock()
-        self._observers: List[Callable[[MemoryEvent], None]] = []
-        self._session_metadata: Dict[str, Dict[str, Any]] = {}
+    def __init__(self, redis_url: str = "redis://localhost:6379"):
+        self.redis_url = redis_url
+        self._redis: Optional[redis.Redis] = None
+        self._local_cache: Dict[str, Any] = {}
+        self._cache_lock = threading.RLock()
         
-    def create_session_memory(self, session_id: str, initial_data: Optional[Dict[str, Any]] = None) -> None:
-        """Create isolated memory space for a session"""
-        with self._global_lock:
-            if session_id in self._memory:
-                logger.warning(f"Session {session_id} memory already exists")
-                return
-                
-            self._memory[session_id] = initial_data or {}
-            self._locks[session_id] = threading.RLock()
-            self._session_metadata[session_id] = {
-                'created_at': time.time(),
-                'last_accessed': time.time(),
-                'access_count': 0
-            }
-            
-            # Notify observers
-            event = MemoryEvent(
-                event_type=MemoryEventType.SESSION_CREATED,
-                session_id=session_id,
-                data={'initial_data': initial_data}
-            )
-            self._notify_observers(event)
-            
-        logger.info(f"Created session memory for: {session_id}")
-    
-    @contextmanager
-    def get_session_lock(self, session_id: str):
-        """Context manager for thread-safe session access"""
-        if session_id not in self._locks:
-            with self._global_lock:
-                if session_id not in self._locks:
-                    raise KeyError(f"Session {session_id} not found")
-        
-        lock = self._locks[session_id]
-        lock.acquire()
+    async def initialize(self):
+        """Initialize Redis connection"""
         try:
-            # Update access metadata
-            if session_id in self._session_metadata:
-                self._session_metadata[session_id]['last_accessed'] = time.time()
-                self._session_metadata[session_id]['access_count'] += 1
-            yield
-        finally:
-            lock.release()
-    
-    def set_data(self, session_id: str, key: str, value: Any, agent_id: Optional[str] = None) -> None:
-        """Set data in session memory with thread safety"""
-        with self.get_session_lock(session_id):
-            if session_id not in self._memory:
-                raise KeyError(f"Session {session_id} not found")
-                
-            old_value = self._memory[session_id].get(key)
-            self._memory[session_id][key] = value
-            
-            # Notify observers only if value changed
-            if old_value != value:
-                event = MemoryEvent(
-                    event_type=MemoryEventType.DATA_UPDATED,
-                    session_id=session_id,
-                    data={'key': key, 'value': value, 'old_value': old_value},
-                    agent_id=agent_id
-                )
-                self._notify_observers(event)
-                
-        logger.debug(f"Set {key} in session {session_id}")
-    
-    def get_data(self, session_id: str, key: str, default: Any = None) -> Any:
-        """Get data from session memory with thread safety"""
-        with self.get_session_lock(session_id):
-            if session_id not in self._memory:
-                raise KeyError(f"Session {session_id} not found")
-            return self._memory[session_id].get(key, default)
-    
-    def get_all_data(self, session_id: str) -> Dict[str, Any]:
-        """Get all data from session memory"""
-        with self.get_session_lock(session_id):
-            if session_id not in self._memory:
-                raise KeyError(f"Session {session_id} not found")
-            return self._memory[session_id].copy()
-    
-    def update_data(self, session_id: str, data: Dict[str, Any], agent_id: Optional[str] = None) -> None:
-        """Update multiple keys in session memory"""
-        with self.get_session_lock(session_id):
-            if session_id not in self._memory:
-                raise KeyError(f"Session {session_id} not found")
-                
-            old_data = self._memory[session_id].copy()
-            self._memory[session_id].update(data)
-            
-            # Notify observers
-            event = MemoryEvent(
-                event_type=MemoryEventType.DATA_UPDATED,
-                session_id=session_id,
-                data={'updated_keys': list(data.keys()), 'old_data': old_data},
-                agent_id=agent_id
+            self._redis = redis.from_url(
+                self.redis_url,
+                encoding="utf-8",
+                decode_responses=True
             )
-            self._notify_observers(event)
+            await self._redis.ping()
+            logger.info("Redis connection established")
+        except Exception as e:
+            logger.error(f"Failed to connect to Redis: {e}")
+            raise
     
-    def delete_data(self, session_id: str, key: str) -> bool:
-        """Delete data from session memory"""
-        with self.get_session_lock(session_id):
-            if session_id not in self._memory:
-                return False
-            return self._memory[session_id].pop(key, None) is not None
+    async def close(self):
+        """Close Redis connection"""
+        if self._redis:
+            await self._redis.close()
     
-    def clear_session(self, session_id: str) -> None:
-        """Clear all data from session memory"""
-        with self.get_session_lock(session_id):
-            if session_id in self._memory:
-                self._memory[session_id].clear()
-                logger.info(f"Cleared session memory: {session_id}")
-    
-    def destroy_session(self, session_id: str) -> None:
-        """Completely remove session memory and locks"""
-        with self._global_lock:
-            if session_id in self._memory:
-                del self._memory[session_id]
-            if session_id in self._locks:
-                del self._locks[session_id]
-            if session_id in self._session_metadata:
-                del self._session_metadata[session_id]
-                
-            # Notify observers
-            event = MemoryEvent(
-                event_type=MemoryEventType.SESSION_ENDED,
-                session_id=session_id,
-                data={}
+    async def set_campaign_data(self, campaign_id: str, data: CampaignData):
+        """Store campaign data in shared memory"""
+        try:
+            serialized_data = json.dumps(asdict(data), default=str)
+            await self._redis.hset(
+                f"campaign:{campaign_id}",
+                mapping={"data": serialized_data}
             )
-            self._notify_observers(event)
             
-        logger.info(f"Destroyed session memory: {session_id}")
+            # Cache locally
+            with self._cache_lock:
+                self._local_cache[f"campaign:{campaign_id}"] = data
+                
+            logger.info(f"Campaign data stored for {campaign_id}")
+        except Exception as e:
+            logger.error(f"Failed to store campaign data: {e}")
+            raise
     
-    def list_sessions(self) -> List[str]:
-        """List all active sessions"""
-        with self._global_lock:
-            return list(self._memory.keys())
+    async def get_campaign_data(self, campaign_id: str) -> Optional[CampaignData]:
+        """Retrieve campaign data from shared memory"""
+        try:
+            # Check local cache first
+            cache_key = f"campaign:{campaign_id}"
+            with self._cache_lock:
+                if cache_key in self._local_cache:
+                    return self._local_cache[cache_key]
+            
+            # Get from Redis
+            data = await self._redis.hget(f"campaign:{campaign_id}", "data")
+            if data:
+                parsed_data = json.loads(data)
+                campaign_data = CampaignData(**parsed_data)
+                
+                # Update local cache
+                with self._cache_lock:
+                    self._local_cache[cache_key] = campaign_data
+                
+                return campaign_data
+            
+            return None
+        except Exception as e:
+            logger.error(f"Failed to retrieve campaign data: {e}")
+            return None
     
-    def get_session_metadata(self, session_id: str) -> Optional[Dict[str, Any]]:
-        """Get session metadata"""
-        return self._session_metadata.get(session_id)
+    async def add_design_iteration(self, iteration: DesignIteration):
+        """Add a new design iteration"""
+        try:
+            serialized_iteration = json.dumps(asdict(iteration), default=str)
+            await self._redis.hset(
+                f"iteration:{iteration.iteration_id}",
+                mapping={"data": serialized_iteration}
+            )
+            
+            # Add to campaign's iteration list
+            await self._redis.lpush(
+                f"campaign:{iteration.campaign_id}:iterations",
+                iteration.iteration_id
+            )
+            
+            logger.info(f"Design iteration {iteration.iteration_id} added")
+        except Exception as e:
+            logger.error(f"Failed to add design iteration: {e}")
+            raise
     
-    def add_observer(self, observer: Callable[[MemoryEvent], None]) -> None:
-        """Add observer for memory events"""
-        self._observers.append(observer)
+    async def get_design_iteration(self, iteration_id: str) -> Optional[DesignIteration]:
+        """Get a specific design iteration"""
+        try:
+            data = await self._redis.hget(f"iteration:{iteration_id}", "data")
+            if data:
+                parsed_data = json.loads(data)
+                return DesignIteration(**parsed_data)
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get design iteration: {e}")
+            return None
     
-    def remove_observer(self, observer: Callable[[MemoryEvent], None]) -> None:
-        """Remove observer"""
-        if observer in self._observers:
-            self._observers.remove(observer)
+    async def get_campaign_iterations(self, campaign_id: str) -> List[DesignIteration]:
+        """Get all iterations for a campaign"""
+        try:
+            iteration_ids = await self._redis.lrange(
+                f"campaign:{campaign_id}:iterations", 0, -1
+            )
+            
+            iterations = []
+            for iteration_id in iteration_ids:
+                iteration = await self.get_design_iteration(iteration_id)
+                if iteration:
+                    iterations.append(iteration)
+            
+            return iterations
+        except Exception as e:
+            logger.error(f"Failed to get campaign iterations: {e}")
+            return []
     
-    def _notify_observers(self, event: MemoryEvent) -> None:
-        """Notify all observers about memory events"""
-        for observer in self._observers:
-            try:
-                observer(event)
-            except Exception as e:
-                logger.error(f"Error notifying observer: {e}")
+    async def update_iteration_status(self, iteration_id: str, status: str):
+        """Update iteration status"""
+        try:
+            iteration = await self.get_design_iteration(iteration_id)
+            if iteration:
+                iteration.status = status
+                await self.add_design_iteration(iteration)
+                logger.info(f"Iteration {iteration_id} status updated to {status}")
+        except Exception as e:
+            logger.error(f"Failed to update iteration status: {e}")
+    
+    async def add_feedback(self, iteration_id: str, feedback: Dict[str, Any]):
+        """Add feedback to a design iteration"""
+        try:
+            iteration = await self.get_design_iteration(iteration_id)
+            if iteration:
+                iteration.feedback.append({
+                    **feedback,
+                    "timestamp": datetime.now().isoformat()
+                })
+                await self.add_design_iteration(iteration)
+                logger.info(f"Feedback added to iteration {iteration_id}")
+        except Exception as e:
+            logger.error(f"Failed to add feedback: {e}")
+    
+    async def set_agent_state(self, agent_id: str, state: Dict[str, Any]):
+        """Set agent state"""
+        try:
+            serialized_state = json.dumps(state, default=str)
+            await self._redis.hset(
+                f"agent:{agent_id}",
+                mapping={"state": serialized_state}
+            )
+        except Exception as e:
+            logger.error(f"Failed to set agent state: {e}")
+    
+    async def get_agent_state(self, agent_id: str) -> Dict[str, Any]:
+        """Get agent state"""
+        try:
+            state = await self._redis.hget(f"agent:{agent_id}", "state")
+            if state:
+                return json.loads(state)
+            return {}
+        except Exception as e:
+            logger.error(f"Failed to get agent state: {e}")
+            return {}
+    
+    async def publish_event(self, channel: str, message: Dict[str, Any]):
+        """Publish event to a channel"""
+        try:
+            serialized_message = json.dumps(message, default=str)
+            await self._redis.publish(channel, serialized_message)
+        except Exception as e:
+            logger.error(f"Failed to publish event: {e}")
+    
+    async def subscribe_to_events(self, channels: List[str]):
+        """Subscribe to event channels"""
+        try:
+            pubsub = self._redis.pubsub()
+            await pubsub.subscribe(*channels)
+            return pubsub
+        except Exception as e:
+            logger.error(f"Failed to subscribe to events: {e}")
+            return None
