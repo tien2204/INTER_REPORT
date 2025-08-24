@@ -1,0 +1,41 @@
+# Vietnamese Legal RAG System with TTS Requirements
+# Core dependencies for the Vietnamese Legal RAG system
+
+# LLM and NLP
+transformers>=4.36.0
+torch>=2.1.0
+datasets>=2.14.0
+accelerate>=0.24.0
+bitsandbytes>=0.41.0
+
+# LangChain ecosystem
+langchain>=0.1.0
+langchain-community>=0.0.10
+langchain-core>=0.1.0
+
+# Vector store and embeddings
+weaviate-client>=3.24.0
+sentence-transformers>=2.2.2
+rank_bm25>=0.2.2
+FlagEmbedding>=1.2.0
+faiss-cpu>=1.7.4
+
+# Text-to-Speech and audio
+soundfile>=0.12.1
+librosa>=0.10.1
+pydub>=0.25.1
+IPython>=8.0.0
+
+# Data processing
+numpy>=1.24.3
+pandas>=2.1.0
+scipy>=1.11.2
+
+# Utility
+python-dotenv>=1.0.0
+tqdm>=4.65.0
+pydantic>=2.0.0
+pydantic-settings>=2.1.0
+
+# Optional: For Jupyter/Kaggle environments
+ipywidgets>=8.0.0
