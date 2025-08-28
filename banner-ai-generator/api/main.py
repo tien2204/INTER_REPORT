@@ -17,6 +17,12 @@ from contextlib import asynccontextmanager
 import time
 from typing import Dict, Any
 from structlog import get_logger
+# Import SlowAPI cho rate limiting
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+# Import Socket.IO cho WebSocket
+import socketio
 
 from .routers import campaigns, agents, assets, designs
 from .middleware.auth import AuthMiddleware
@@ -35,9 +41,46 @@ logger = get_logger(__name__)
 # Global app instance
 banner_app: BannerGeneratorApp = None
 
+# Cài đặt limiter cho rate limiting
+limiter = Limiter(key_func=get_remote_address, default_limits=["30 per minute"])
+
+# Khởi tạo Socket.IO server
+sio = socketio.AsyncServer(
+    async_mode='asgi',
+    cors_allowed_origins=['http://172.26.33.210:3000', 'http://localhost:3000'],
+    ping_timeout=5000,
+    ping_interval=25000
+)
+
+# Socket.IO event handlers
+@sio.event
+async def connect(sid, environ):
+    """Handle client connection"""
+    logger.info(f"Client connected: {sid}")
+
+@sio.event
+async def disconnect(sid):
+    """Handle client disconnection"""
+    logger.info(f"Client disconnected: {sid}")
+
+@sio.event
+async def subscribe_to_progress(sid, design_id):
+    """Handle subscription to design progress updates"""
+    await sio.save_session(sid, {'design_id': design_id})
+    logger.info(f"Client {sid} subscribed to progress updates for design {design_id}")
+    
+    # Gửi thông báo xác nhận đăng ký
+    await sio.emit('subscription_confirmed', {'design_id': design_id}, room=sid)
+
+# Hàm này để các module khác gọi để gửi cập nhật tiến độ
+async def send_progress_update(design_id, progress_data):
+    """Send progress update to clients subscribed to a design"""
+    await sio.emit('progress_update', progress_data, room=design_id)
+    logger.debug(f"Sent progress update for design {design_id}: {progress_data}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global banner_app  # Fix: Add global declaration to modify the global variable
+    global banner_app
     logger.info("Starting Banner Generator API...")
     try:
         banner_app = BannerGeneratorApp()
@@ -54,7 +97,7 @@ async def lifespan(app: FastAPI):
             await banner_app.shutdown()
             logger.info("System shutdown complete")
 
-# Create FastAPI app
+# Create FastAPI app - CHỈ TẠO MỘT LẦN DUY NHẤT
 app = FastAPI(
     title="Banner AI Generator API",
     description="Multi-AI Agent system for automated banner generation",
@@ -64,21 +107,36 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Cấu hình rate limiting
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # Add middleware
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure based on environment
+    allow_origins=["http://172.26.33.210:3000", "http://localhost:3000"],  # Thêm localhost để dễ phát triển
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Mount Socket.IO app vào /ws
+app.mount('/ws', socketio.ASGIApp(sio, app))
+
+# Thêm middleware đo thời gian xử lý
+@app.middleware("http")
+async def add_process_time_header(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = time.time() - start_time
+    response.headers["X-Process-Time"] = str(process_time)
+    return response
+
 # Custom middleware
 app.add_middleware(LoggingMiddleware)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(AuthMiddleware)
-
 
 # Exception handlers
 @app.exception_handler(HTTPException)
@@ -425,4 +483,4 @@ async def get_designs():
         return {"designs": [], "total": 0}
 
 # Export for use in routers
-__all__ = ["app", "get_banner_app"]
+__all__ = ["app", "get_banner_app", "sio", "send_progress_update"]

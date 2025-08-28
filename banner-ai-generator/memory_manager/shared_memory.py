@@ -48,7 +48,7 @@ class SharedMemory:
     Shared memory manager using Redis for distributed access
     """
     
-    def __init__(self, redis_url: str = "redis://localhost:6379"):
+    def __init__(self, redis_url: str = "redis://172.26.33.210:6379"):
         self.redis_url = redis_url
         self._redis: Optional[redis.Redis] = None
         self._local_cache: Dict[str, Any] = {}

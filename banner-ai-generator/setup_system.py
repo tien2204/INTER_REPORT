@@ -197,7 +197,7 @@ class SystemValidator:
         try:
             # Test Redis connection
             import redis.asyncio as redis
-            redis_client = redis.from_url("redis://localhost:6379")
+            redis_client = redis.from_url("redis://172.26.33.210:6379")
             
             try:
                 await redis_client.ping()

@@ -27,9 +27,10 @@ export const useWebSocketStore = defineStore('websocket', () => {
     }
 
     try {
-      socket.value = io('ws://localhost:8000', {
-        transports: ['websocket', 'polling'],
-        timeout: 5000,
+      socket.value = io({
+        path: '/ws/socket.io',
+        transports: ['polling', 'websocket'],
+        timeout: 10000,
         reconnection: true,
         reconnectionAttempts: 5,
         reconnectionDelay: 1000

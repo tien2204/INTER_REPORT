@@ -27,7 +27,7 @@ class MessageQueue:
         if config is None:
             config = {}
         self.config = config
-        self.redis_url = config.get("redis_url", "redis://localhost:6379")
+        self.redis_url = config.get("redis_url", "redis://172.26.33.210:6379")
         self._redis: Optional[redis.Redis] = None
         self._subscribers: Dict[str, Callable] = {}
         self._running = False

@@ -23,7 +23,7 @@ class DatabaseConfig:
 @dataclass 
 class RedisConfig:
     """Redis configuration"""
-    url: str = "redis://localhost:6379"
+    url: str = "redis://172.26.33.210:6379"
     max_connections: int = 10
     retry_on_timeout: bool = True
     socket_timeout: int = 5
@@ -37,7 +37,11 @@ class SecurityConfig:
     jwt_secret: str = "your-jwt-secret-here"
     access_token_expire_minutes: int = 30
     algorithm: str = "HS256"
-    cors_origins: list = field(default_factory=lambda: ["http://localhost:3000", "http://localhost:8080"])
+    cors_origins: list = field(default_factory=lambda: [
+        "http://localhost:3000", 
+        "http://localhost:8080",
+        "http://172.26.33.210:3000"  # Thêm địa chỉ IP của frontend
+    ])
 
 
 @dataclass
@@ -110,7 +114,7 @@ class SystemConfig:
         
         # Redis configuration
         self.redis = RedisConfig(
-            url=os.getenv("REDIS_URL", "redis://localhost:6379"),
+            url=os.getenv("REDIS_URL", "redis://172.26.33.210:6379"),
             max_connections=int(os.getenv("REDIS_MAX_CONNECTIONS", "10")),
             socket_timeout=int(os.getenv("REDIS_SOCKET_TIMEOUT", "5"))
         )
