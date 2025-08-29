@@ -1,7 +1,6 @@
 import { io, Socket } from 'socket.io-client';
 
-// Nếu proxy không hoạt động thì sử dụng URL đầy đủ
-const socketURL = '/socket.io'; // Hoặc import.meta.env.VITE_WS_URL
+const socketURL = "/socket.io"; // để proxy xử lý
 
 let socket: Socket | null = null;
 
