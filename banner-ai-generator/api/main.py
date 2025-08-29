@@ -47,20 +47,25 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["30 per minute"])
 # Khởi tạo Socket.IO server
 sio = socketio.AsyncServer(
     async_mode='asgi',
-    cors_allowed_origins=['http://172.26.33.210:3000', 'http://localhost:3000'],
-    ping_timeout=5000,
-    ping_interval=25000
+    cors_allowed_origins=["http://172.26.33.210:3000", "http://localhost:3000"],
+    cors_credentials=True,
+    ping_timeout=60000,
+    ping_interval=25000,
+    logger=True,
+    engineio_logger=True
 )
 
 # Socket.IO event handlers
 @sio.event
 async def connect(sid, environ):
     """Handle client connection"""
+    print("🔌 Client connected:", sid)
     logger.info(f"Client connected: {sid}")
 
 @sio.event
 async def disconnect(sid):
     """Handle client disconnection"""
+    print("❌ Client disconnected:", sid)
     logger.info(f"Client disconnected: {sid}")
 
 @sio.event
@@ -107,6 +112,9 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# MOUNT SOCKET.IO NGAY SAU KHI TẠO APP, TRƯỚC KHI THÊM MIDDLEWARE
+# app.mount('/socket.io', socketio.ASGIApp(sio))
+
 # Cấu hình rate limiting
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -120,9 +128,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Mount Socket.IO app vào /ws
-app.mount('/ws', socketio.ASGIApp(sio, app))
 
 # Thêm middleware đo thời gian xử lý
 @app.middleware("http")
@@ -482,5 +487,19 @@ async def get_designs():
         logger.error(f"Error getting designs: {e}")
         return {"designs": [], "total": 0}
 
+socketio_asgi = socketio.ASGIApp(sio)
+
+async def combined_asgi(scope, receive, send):
+   """Combined ASGI application for FastAPI + Socket.IO"""
+   if scope['type'] == 'http' and scope['path'].startswith('/socket.io/'):
+       await socketio_asgi(scope, receive, send)
+   elif scope['type'] == 'websocket' and scope['path'].startswith('/socket.io/'):
+       await socketio_asgi(scope, receive, send)
+   else:
+       await app(scope, receive, send)
+
+# Export combined app
+__all__ = ["combined_asgi", "app", "get_banner_app", "sio", "send_progress_update"]
+
 # Export for use in routers
-__all__ = ["app", "get_banner_app", "sio", "send_progress_update"]
+# __all__ = ["app", "get_banner_app", "sio", "send_progress_update"]
