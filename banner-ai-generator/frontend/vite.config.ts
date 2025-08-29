@@ -18,20 +18,21 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: BACKEND_URL,
-        changeOrigin: true
+        changeOrigin: true,
+        secure: false
       },
       '/socket.io': {
-        target: WEBSOCKET_URL,
+        target: BACKEND_URL,
         ws: true,
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/ws/, '/ws')
+        secure: false
       }
     }
   },
   define: {
     // Tạo biến môi trường mà code có thể truy cập
     'import.meta.env.VITE_API_URL': JSON.stringify(BACKEND_URL),
-    'import.meta.env.VITE_WS_URL': JSON.stringify(WEBSOCKET_URL)
+    'import.meta.env.VITE_WS_URL': JSON.stringify(BACKEND_URL)
   },
   build: {
     outDir: 'dist',
