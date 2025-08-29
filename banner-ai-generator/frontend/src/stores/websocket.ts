@@ -27,9 +27,10 @@ export const useWebSocketStore = defineStore('websocket', () => {
     }
 
     try {
-      socket.value = io({
-        path: '/ws/socket.io',
-        transports: ['polling', 'websocket'],
+      // ✅ KHÔNG hardcode IP, để proxy xử lý
+      socket.value = io("http://172.26.33.210:8000", {
+        path: '/socket.io/',
+        transports: ['websocket'],
         timeout: 10000,
         reconnection: true,
         reconnectionAttempts: 5,
@@ -40,16 +41,16 @@ export const useWebSocketStore = defineStore('websocket', () => {
         connected.value = true
         reconnecting.value = false
         console.log('WebSocket connected')
-        
+        console.log("✅ Connected:", socket.value.id);
         notificationStore.success('Connected', 'Real-time updates enabled')
       })
 
       socket.value.on('disconnect', (reason) => {
         connected.value = false
         console.log('WebSocket disconnected:', reason)
-        
+        console.log("❌ Disconnected:", reason);
+
         if (reason === 'io server disconnect') {
-          // Server disconnected, try to reconnect
           socket.value?.connect()
         }
       })
@@ -58,7 +59,6 @@ export const useWebSocketStore = defineStore('websocket', () => {
         connected.value = true
         reconnecting.value = false
         console.log('WebSocket reconnected')
-        
         notificationStore.success('Reconnected', 'Real-time updates restored')
       })
 
@@ -74,9 +74,8 @@ export const useWebSocketStore = defineStore('websocket', () => {
       socket.value.on('connect_error', (error) => {
         console.error('WebSocket connection error:', error)
         connected.value = false
-        
         notificationStore.warning(
-          'Connection Issue', 
+          'Connection Issue',
           'Unable to connect for real-time updates'
         )
       })
@@ -112,8 +111,6 @@ export const useWebSocketStore = defineStore('websocket', () => {
 
   const addMessage = (message: WebSocketMessage) => {
     messages.value.unshift(message)
-    
-    // Keep only the most recent messages
     if (messages.value.length > maxMessages.value) {
       messages.value = messages.value.slice(0, maxMessages.value)
     }
@@ -127,7 +124,6 @@ export const useWebSocketStore = defineStore('websocket', () => {
       timestamp: new Date().toISOString()
     })
 
-    // Show progress notification for workflows
     if (data.progress_percentage >= 100) {
       notificationStore.success(
         'Workflow Complete',
@@ -169,29 +165,10 @@ export const useWebSocketStore = defineStore('websocket', () => {
       timestamp: new Date().toISOString()
     })
 
-    const alertType = data.severity === 'critical' ? 'error' : 
+    const alertType = data.severity === 'critical' ? 'error' :
                      data.severity === 'warning' ? 'warning' : 'info'
 
-    notificationStore[alertType](
-      'System Alert',
-      data.message
-    )
-  }
-
-  const subscribeToDesign = (designId: string) => {
-    emit('subscribe_design', { design_id: designId })
-  }
-
-  const unsubscribeFromDesign = (designId: string) => {
-    emit('unsubscribe_design', { design_id: designId })
-  }
-
-  const subscribeToWorkflow = (workflowId: string) => {
-    emit('subscribe_workflow', { workflow_id: workflowId })
-  }
-
-  const unsubscribeFromWorkflow = (workflowId: string) => {
-    emit('unsubscribe_workflow', { workflow_id: workflowId })
+    notificationStore[alertType]('System Alert', data.message)
   }
 
   return {
@@ -203,10 +180,6 @@ export const useWebSocketStore = defineStore('websocket', () => {
     isReconnecting,
     connect,
     disconnect,
-    emit,
-    subscribeToDesign,
-    unsubscribeFromDesign,
-    subscribeToWorkflow,
-    unsubscribeFromWorkflow
+    emit
   }
 })
