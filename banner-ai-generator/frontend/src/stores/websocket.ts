@@ -1,3 +1,4 @@
+// frontend/src/stores/websocket.ts
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { io, Socket } from 'socket.io-client'
@@ -27,57 +28,69 @@ export const useWebSocketStore = defineStore('websocket', () => {
     }
 
     try {
-      // ✅ KHÔNG hardcode IP, để proxy xử lý
-      socket.value = io("http://172.26.33.210:8000", {
+      // ✅ SỬA LẠI: Sử dụng proxy thay vì hardcode IP
+      socket.value = io({
         path: '/socket.io/',
-        transports: ['websocket'],
+        transports: ['websocket', 'polling'], // Thêm polling làm fallback
         timeout: 10000,
         reconnection: true,
         reconnectionAttempts: 5,
-        reconnectionDelay: 1000
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 5000,
+        upgrade: true, // Cho phép upgrade từ polling lên websocket
+        rememberUpgrade: true, // Nhớ upgrade cho lần kết nối tiếp theo
+        forceNew: false // Tái sử dụng kết nối hiện có nếu có thể
       })
 
       socket.value.on('connect', () => {
         connected.value = true
         reconnecting.value = false
-        console.log('WebSocket connected')
-        console.log("✅ Connected:", socket.value.id);
+        console.log('✅ WebSocket connected:', socket.value?.id)
         notificationStore.success('Connected', 'Real-time updates enabled')
       })
 
       socket.value.on('disconnect', (reason) => {
         connected.value = false
-        console.log('WebSocket disconnected:', reason)
-        console.log("❌ Disconnected:", reason);
+        console.log('❌ WebSocket disconnected:', reason)
 
-        if (reason === 'io server disconnect') {
-          socket.value?.connect()
+        // Tự động reconnect cho một số lý do disconnect
+        if (reason === 'io server disconnect' || reason === 'transport close') {
+          console.log('🔄 Attempting to reconnect...')
+          setTimeout(() => {
+            socket.value?.connect()
+          }, 2000)
         }
       })
 
-      socket.value.on('reconnect', () => {
+      socket.value.on('reconnect', (attemptNumber) => {
         connected.value = true
         reconnecting.value = false
-        console.log('WebSocket reconnected')
+        console.log('✅ WebSocket reconnected after', attemptNumber, 'attempts')
         notificationStore.success('Reconnected', 'Real-time updates restored')
       })
 
-      socket.value.on('reconnect_attempt', () => {
+      socket.value.on('reconnect_attempt', (attemptNumber) => {
         reconnecting.value = true
-        console.log('WebSocket attempting to reconnect')
+        console.log('🔄 WebSocket attempting to reconnect (#' + attemptNumber + ')')
       })
 
       socket.value.on('reconnect_error', (error) => {
-        console.error('WebSocket reconnection error:', error)
+        console.error('❌ WebSocket reconnection error:', error)
       })
 
       socket.value.on('connect_error', (error) => {
-        console.error('WebSocket connection error:', error)
+        console.error('❌ WebSocket connection error:', error)
         connected.value = false
-        notificationStore.warning(
-          'Connection Issue',
-          'Unable to connect for real-time updates'
-        )
+        
+        // Chỉ hiển thị warning sau một vài lần thử
+        if (error.message.includes('timeout') || error.message.includes('websocket')) {
+          console.log('🔄 Will retry with polling transport...')
+        } else {
+          notificationStore.warning(
+            'Connection Issue',
+            'Unable to connect for real-time updates'
+          )
+        }
       })
 
       // Listen for specific events
@@ -87,7 +100,7 @@ export const useWebSocketStore = defineStore('websocket', () => {
       socket.value.on('system_alert', handleSystemAlert)
 
     } catch (error) {
-      console.error('Failed to initialize WebSocket:', error)
+      console.error('❌ Failed to initialize WebSocket:', error)
       notificationStore.error('Connection Error', 'Failed to initialize real-time connection')
     }
   }
@@ -105,7 +118,7 @@ export const useWebSocketStore = defineStore('websocket', () => {
     if (socket.value?.connected) {
       socket.value.emit(event, data)
     } else {
-      console.warn('WebSocket not connected, cannot emit event:', event)
+      console.warn('⚠️ WebSocket not connected, cannot emit event:', event)
     }
   }
 
