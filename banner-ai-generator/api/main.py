@@ -47,21 +47,31 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["30 per minute"])
 # Khởi tạo Socket.IO server
 sio = socketio.AsyncServer(
     async_mode='asgi',
-    cors_allowed_origins=["http://172.26.33.210:3000", "http://localhost:3000"],
+    cors_allowed_origins=[
+        "http://172.26.33.210:3000", 
+        "http://localhost:3000",
+        "https://172.26.33.210:3000",  # Thêm HTTPS nếu cần
+        "*"  # Tạm thời cho phép tất cả origins để debug
+    ],
     cors_credentials=True,
-    ping_timeout=60000,
-    ping_interval=25000,
+    ping_timeout=60,  # Giảm timeout
+    ping_interval=25,  # Giảm interval
+    max_http_buffer_size=1000000,
     logger=True,
-    engineio_logger=True
+    engineio_logger=True,
+    transports=['websocket', 'polling']  # Hỗ trợ cả websocket và polling
 )
 
 # Socket.IO event handlers
 @sio.event
 async def connect(sid, environ):
     """Handle client connection"""
-    print("🔌 Client connected:", sid)
-    logger.info(f"Client connected: {sid}")
-
+    client_ip = environ.get('HTTP_X_FORWARDED_FOR', environ.get('REMOTE_ADDR', 'unknown'))
+    print(f"🔌 Client connected: {sid} from {client_ip}")
+    logger.info(f"Client connected: {sid} from {client_ip}")
+    
+    # Gửi thông báo welcome
+    await sio.emit('welcome', {'message': 'Connected to Banner AI Generator'}, room=sid)
 @sio.event
 async def disconnect(sid):
     """Handle client disconnection"""
@@ -71,17 +81,28 @@ async def disconnect(sid):
 @sio.event
 async def subscribe_to_progress(sid, design_id):
     """Handle subscription to design progress updates"""
-    await sio.save_session(sid, {'design_id': design_id})
-    logger.info(f"Client {sid} subscribed to progress updates for design {design_id}")
-    
-    # Gửi thông báo xác nhận đăng ký
-    await sio.emit('subscription_confirmed', {'design_id': design_id}, room=sid)
+    try:
+        await sio.save_session(sid, {'design_id': design_id})
+        logger.info(f"Client {sid} subscribed to progress updates for design {design_id}")
+        
+        # Join room cho design cụ thể
+        await sio.enter_room(sid, f"design_{design_id}")
+        
+        # Gửi thông báo xác nhận đăng ký
+        await sio.emit('subscription_confirmed', {'design_id': design_id}, room=sid)
+    except Exception as e:
+        logger.error(f"Error in subscribe_to_progress: {e}")
+        await sio.emit('error', {'message': f'Failed to subscribe: {str(e)}'}, room=sid)
 
 # Hàm này để các module khác gọi để gửi cập nhật tiến độ
 async def send_progress_update(design_id, progress_data):
     """Send progress update to clients subscribed to a design"""
-    await sio.emit('progress_update', progress_data, room=design_id)
-    logger.debug(f"Sent progress update for design {design_id}: {progress_data}")
+    try:
+        room = f"design_{design_id}"
+        await sio.emit('progress_update', progress_data, room=room)
+        logger.debug(f"Sent progress update for design {design_id}: {progress_data}")
+    except Exception as e:
+        logger.error(f"Failed to send progress update: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -487,14 +508,19 @@ async def get_designs():
         logger.error(f"Error getting designs: {e}")
         return {"designs": [], "total": 0}
 
-socketio_asgi = socketio.ASGIApp(sio)
+socketio_asgi = socketio.ASGIApp(sio, other_asgi_app=None)
 
 async def combined_asgi(scope, receive, send):
    """Combined ASGI application for FastAPI + Socket.IO"""
-   if scope['type'] == 'http' and scope['path'].startswith('/socket.io/'):
+   path = scope.get('path', '')
+    
+   # Socket.IO routes
+   if path.startswith('/socket.io/'):
        await socketio_asgi(scope, receive, send)
-   elif scope['type'] == 'websocket' and scope['path'].startswith('/socket.io/'):
+   # WebSocket upgrade requests for Socket.IO
+   elif scope['type'] == 'websocket' and path.startswith('/socket.io/'):
        await socketio_asgi(scope, receive, send)
+   # All other routes go to FastAPI
    else:
        await app(scope, receive, send)
 
